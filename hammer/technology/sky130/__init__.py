@@ -83,6 +83,7 @@ class SKY130Tech(HammerTechnology):
             libs += [
                 Library(
                     lef_file=os.path.join(SKY130_SCL, "sky130_scl_9T_tech/lef/sky130_scl_9T_phyCells.lef"),
+                    gds_file=os.path.join(SKY130_SCL, "sky130_scl_9T_tech/gds/sky130_scl_9T_tech.gds"),
                     provides=[Provide(lib_type="technology")],
                 ),
             ]
@@ -236,7 +237,14 @@ class SKY130Tech(HammerTechnology):
             # The cadence PDK (as of version 0.0.3) doesn't seem to have tap nor decap cells, so par won't run (and if we forced it to, lvs would fail)
             spcl_cells = [
                 SpecialCell(
-                    cell_type="stdfiller", name=[f"FILL{i**2}" for i in range(7)]
+                    cell_type=CellType("stdfiller"), name=["FILL1", "FILL2", "FILL4", "FILL8", "FILL16"]
+                ),
+                SpecialCell(
+                    cell_type=CellType("decap"),
+                    name=[
+                        "FILL_DECAP8",
+                        "FILL_DECAP16",
+                    ],
                 ),
                 SpecialCell(
                     cell_type="driver",
@@ -803,9 +811,9 @@ class SKY130Tech(HammerTechnology):
         if self.get_setting("technology.sky130.stdcell_library") == "sky130_scl":
             hooks["innovus"].extend(
                 [
-                    HammerTool.make_pre_insertion_hook(
-                        "power_straps", power_rail_straps_no_tapcells
-                    ),
+                    # HammerTool.make_pre_insertion_hook(
+                    #     "power_straps", power_rail_straps_no_tapcells
+                    # ), # replaced by manual power rail settings in design-ofo.yml - jim 8/2/2025
                     HammerTool.make_pre_insertion_hook(
                         "clock_tree", set_cts_base_cells
                     ),
@@ -834,11 +842,7 @@ class SKY130Tech(HammerTechnology):
                     "generate_drc_ctl_file", pegasus_drc_blackbox_srams
                 )
             )
-        pegasus_hooks.append(
-            HammerTool.make_post_insertion_hook(
-                "generate_drc_ctl_file", pegasus_drc_blackbox_io_cells
-            )
-        )
+        # jim - removed 8/9/2025: previously had hook to pegasus_drc_blackbox_io_cells - we need to run drc on io cells since cadence will not black box io cells for signoff
         pegasus_hooks.append(
             HammerTool.make_post_insertion_hook(
                 "generate_drc_ctl_file", false_rules_off
@@ -864,7 +868,7 @@ class SKY130Tech(HammerTechnology):
             )
             pegasus_hooks.append(
                 HammerTool.make_post_insertion_hook(
-                    "generate_lvs_ctl_file", pegasus_lvs_blackbox_srams
+                    "generate_lvs_ctl_file", pegasus_lvs_blackbox
                 )
             )
 
@@ -980,6 +984,8 @@ set_db place_detail_color_aware_legal true
 set_db place_global_solver_effort high
 set_db place_detail_check_cut_spacing true
 set_db place_global_cong_effort high
+set_db place_detail_use_check_drc true
+set_db place_detail_check_route true
 set_db add_fillers_with_drc false
 
 ##########################################################
@@ -1016,7 +1022,7 @@ set_db route_design_with_si_driven true
 set_db route_design_with_timing_driven true
 set_db route_design_concurrent_minimize_via_count_effort high
 set_db opt_consider_routing_congestion true
-set_db route_design_detail_use_multi_cut_via_effort medium
+set_db route_design_detail_use_multi_cut_via_effort high
     """
     )
     if ht.hierarchical_mode in {HierarchicalMode.Top, HierarchicalMode.Flat}:
@@ -1126,40 +1132,24 @@ def calibre_drc_blackbox_srams(ht: HammerTool) -> bool:
     return True
 
 
-# pegasus won't be able to drc the sky130a ios
-def pegasus_drc_blackbox_io_cells(ht: HammerTool) -> bool:
-    assert isinstance(ht, HammerDRCTool) and ht.tool_config_prefix() == "drc.pegasus", (
-        "Exlude IOs only for Pegasus DRC"
-    )
-    drc_box = ""
-    io_cell_names = [
-        "sky130_ef_io__*"
-    ]  # TODO i don't think epgasus actually recognizes these?
-    # io_cell_names = ["sky130_ef_io__gpiov2_pad_wrapped"]
-    for name in io_cell_names:
-        drc_box += f"\nexclude_cell {name}"
-    run_file = ht.drc_ctl_file  # type: ignore
-    with open(run_file, "a") as f:
-        f.write(drc_box)
-    return True
-
 def false_rules_off(x: HammerTool) -> bool:
-    # in sky130_rev_0.0_2.3 rules, cadence included a .cfg to turn off false rules - this typically has to be loaded via the GUI but this step hacks the flags into pegasusdrcctl and turns the false rules off
+    # in sky130_rev_0.0_2.3 or newer decks, cadence included a .cfg to turn off false rules - this typically has to be loaded via the GUI but this step hacks the flags into pegasusdrcctl and turns the false rules off
     # if FALSEOFF is defined, the rules are turned off
     # docs for hooks: /scratch/ee198-20-aaf/barduino-ofot/vlsi/hammer/hammer/drc/pegasus/README.md
 
-    # Version 0.0_2.7  June 13, 2025
+    # Following is for version 0.0_2.10 of DRC decks - configurator options in sky130_release_0.0.9/Sky130_DRC/sky130.drc.cfg
+    # to update these, load the cfg file into the GUI, then look at the updated pegasusdrcctl file and see what the configurator sets variables to
     drc_box = """
 //=== Configurator controls ===
-#DEFINE FALSEOFF
+#UNDEFINE FALSEOFF
 //      (these rules are on by default and may produce false violations)
-#DEFINE SRAM
+#UNDEFINE SRAM
 // These are the affected rules and alternate implementation: 
 //    licon.4a: licon in areaid.ce must overlap LI
 //    licon.4b: licon in areaid.ce must overlap (poly or diff or tap)
 //    mcon.cover.1: mcon in areaid.ce must overlap LI
 // ** WARNING: This switch is for debugging purposes only, errors may be missed **
-#DEFINE NODEN
+#UNDEFINE NODEN
 //  Recommended Rules (RC,RR) & Guidelines (NC)
 #UNDEFINE RC
 #UNDEFINE NC
@@ -1172,6 +1162,7 @@ def false_rules_off(x: HammerTool) -> bool:
     with open(run_file, "a") as f:
         f.write(drc_box)
     return True
+
 
 def pegasus_drc_blackbox_srams(ht: HammerTool) -> bool:
     assert isinstance(ht, HammerDRCTool), "Exlude SRAMs only in DRC"
@@ -1218,26 +1209,60 @@ def pegasus_lvs_add_130a_primitives(ht: HammerTool) -> bool:
         f.write(fixed_contents)
     return True
 
-
-def pegasus_lvs_blackbox_srams(ht: HammerTool) -> bool:
+# we'll use 1 hook for all lvs backboxes
+def pegasus_lvs_blackbox(ht: HammerTool) -> bool:
     assert isinstance(ht, HammerLVSTool), "Blackbox and filter SRAMs only in LVS"
     lvs_box = ""
-    for (
-        name
-        # + SKY130Tech.sky130_sram_primitive_names()
-    ) in SKY130Tech.sky130_sram_names():
+    for name in SKY130Tech.sky130_sram_names():
         lvs_box += f"\nlvs_black_box {name} -gray"
     run_file = ht.lvs_ctl_file  # type: ignore
+    lvs_box += f"\nlvs_black_box simple_por -gray"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__* -black"
+    lvs_box += f"\nlvs_black_box sky130_fd_io__* -black"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__vssio_hvc_clamped_pad -black"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__vssa_hvc_clamped_pad -black"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__vssd_lvc_clamped3_pad -black"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__vdda_hvc_clamped_pad -black"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__vccd_lvc_clamped3_pad -black"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__vssd_lvc_clamped_pad -black"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__vccd_lvc_clamped_pad -black"
+    lvs_box += f"\nlvs_black_box sky130_ef_io__vddio_hvc_clamped_pad -black"
+    lvs_box += f"\nlvs_discard_pins yes"
+    lvs_box += f"\nlvs_report_max -all"
+
     with open(run_file, "r+") as f:
-        # Remove SRAM SPICE file includes.
-        pattern = "schematic_path.*({}).*spice;\n".format(
-            "|".join(SKY130Tech.sky130_sram_names())
-        )
+        # Remove SRAM SPICE file includes and specific hardcoded sram22.spice include - this file is on bwrc servers, not on inst machines
+        sram_names_regex = "|".join(SKY130Tech.sky130_sram_names())
+        pattern = rf'schematic_path\s+.*({sram_names_regex}|sram22\.spice)".*spice;\n'
         matcher = re.compile(pattern)
+
         contents = f.read()
-        fixed_contents = matcher.sub("", contents) + lvs_box
+        fixed_contents = matcher.sub("", contents)
+
+        # Replace layout_path line (FIXME)
+        fixed_contents = re.sub(
+            r'layout_path\s+".*?";',
+            'layout_path "/scratch/jfx/barduino-ofot/vlsi/build/chipyard.harness.TestHarness.BarduinoConfig-ChipTop/par-rundir/ChipTop_drc_lvs.gds";',
+            fixed_contents,
+        )
+
+        # Replace lvs_power_name and lvs_ground_name lines
+        fixed_contents = re.sub(
+            r'lvs_power_name\s+VDD\s*;',
+            'lvs_power_name VDD VPWR vdd VPB VPWR vdd1v8 VCCD VCCHIB VCCD1;',
+            fixed_contents
+        )
+        fixed_contents = re.sub(
+            r'lvs_ground_name\s+VSS\s*;',
+            'lvs_ground_name VSS VGND vss VNB LVGND vss1v8 VGND vss3v3 VNB VSSIO VSSIO_Q VSSD VSSD1 VSSA;',
+            fixed_contents
+        )
+
+        fixed_contents += lvs_box
+
         f.seek(0)
         f.write(fixed_contents)
+        f.truncate()
     return True
 
 
