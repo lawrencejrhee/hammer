@@ -32,3 +32,10 @@ e2e/build*
 e2e/output.json
 e2e/*.log
 e2e/experiments/tests/
+
+# Airflow files (should not be committed)
+airflow.cfg
+airflow.db
+logs/
+simple_auth_manager_passwords.json.generated
+.venv/
