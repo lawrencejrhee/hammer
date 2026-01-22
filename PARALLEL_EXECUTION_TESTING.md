@@ -1,6 +1,8 @@
 # Parallel Execution Testing with PostgreSQL
 
-This document describes the test DAGs created for testing parallel execution with PostgreSQL and how to use them.
+This document describes the test DAGs created for testing parallel execution with PostgreSQL and how to use them. 
+
+NOTE: This is NOT the Postgres setup!
 
 **Author**: Lawrence Rhee  
 **Date**: January 6, 2026  
