@@ -3,7 +3,8 @@
 This document describes the test DAGs created for testing parallel execution with PostgreSQL and how to use them.
 
 **Author**: Lawrence Rhee  
-**Date**: January 6, 2026
+**Date**: January 6, 2026  
+**Last Updated**: January 22, 2026
 
 ## Overview
 
@@ -383,6 +384,79 @@ EOF
 2. Verify scheduler is running: `ps aux | grep "airflow scheduler"`
 3. Check scheduler logs: `tail -f logs/scheduler/latest/*.log`
 4. Increase `task_queued_timeout` in `airflow.cfg`
+
+### Scheduler Crashes with HTTPStatusError (httpx Compatibility Issue)
+
+**Issue**: Scheduler crashes with error:
+```
+TypeError: HTTPStatusError.__init__() missing 2 required keyword-only arguments: 'request' and 'response'
+```
+
+**Symptoms**:
+- Tasks get stuck in "scheduled" or "queued" state
+- Scheduler logs show `HTTPStatusError` exceptions
+- Some tasks complete but others remain queued indefinitely
+- Scheduler process may restart repeatedly
+
+**Root Cause**: 
+Incompatibility between Airflow 3.1.0 and newer versions of `httpx` (0.28.0+). The scheduler uses httpx to communicate with the API server, and newer httpx versions have breaking changes in the `HTTPStatusError` class that cause serialization errors when the executor tries to unpickle task results.
+
+**Solution**:
+Downgrade `httpx` and `httpcore` to compatible versions:
+
+```bash
+cd /bwrcq/home/<username>/hammer
+source .venv/bin/activate
+
+# Uninstall current versions
+pip uninstall -y httpx httpcore
+
+# Install compatible versions
+pip install "httpx==0.27.2" "httpcore==1.0.5"
+
+# Restart all Airflow services
+pkill -9 -f "airflow"
+sleep 2
+
+# Restart scheduler and API server
+export AIRFLOW_HOME=$(pwd)
+nohup airflow scheduler > logs/scheduler.log 2>&1 &
+nohup airflow api-server --port 8090 > logs/api-server.log 2>&1 &
+```
+
+**Verification**:
+1. Check httpx version:
+   ```bash
+   pip show httpx | grep Version
+   # Should show: Version: 0.27.2
+   ```
+
+2. Check scheduler logs for errors:
+   ```bash
+   tail -50 logs/scheduler.log | grep -i error
+   # Should show no HTTPStatusError messages
+   ```
+
+3. Trigger a test DAG:
+   ```bash
+   airflow dags trigger test_parallel_basic
+   ```
+
+4. Verify all tasks complete:
+   ```bash
+   # Wait 10-15 seconds, then check
+   airflow tasks list test_parallel_basic
+   ```
+
+**Prevention**:
+- When installing Airflow 3.1.0, ensure `httpx<0.28.0` is installed
+- Add version constraints to `pyproject.toml` if using Poetry:
+  ```toml
+  httpx = "<0.28.0"
+  httpcore = "~1.0.5"
+  ```
+
+**Note**: This issue was discovered and fixed on January 22, 2026. If you encounter this error, the fix above should resolve it immediately.
 
 ## Next Steps
 
