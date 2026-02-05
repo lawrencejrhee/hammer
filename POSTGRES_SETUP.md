@@ -20,6 +20,7 @@ This document provides a **complete from-scratch guide** for setting up Apache A
   - [Step 0.4: Create Working Directory](#step-04-create-working-directory)
   - [Step 0.5: Clone Hammer Repository](#step-05-clone-hammer-repository)
   - [Step 1: Install Poetry and Dependencies](#step-1-install-poetry-and-dependencies)
+  - [Step 1.3.5: Install Apache Airflow](#step-135-install-apache-airflow)
   - [Step 2: Set Up PostgreSQL Connection](#step-2-set-up-postgresql-connection)
   - [Step 3: Configure Airflow](#step-3-configure-airflow)
   - [Step 4: Initialize Database](#step-4-initialize-database)
@@ -393,17 +394,19 @@ poetry run python --version  # Verify again
 Now install dependencies:
 
 ```bash
-# Install all dependencies including Airflow
+# Install all dependencies (Airflow will be installed separately in Step 1.3.5)
 poetry install
 
 # This will:
 # - Create .venv directory in the project with Python 3.11.9
 # - Install all dependencies from poetry.lock
-# - Install Airflow 3.1.0 and required packages:
-#   - apache-airflow
+# - Install required packages:
 #   - psycopg2 (PostgreSQL adapter)
 #   - asyncpg (required by Airflow)
 #   - pydantic (>=2.12.2)
+# 
+# NOTE: Apache Airflow is NOT installed by poetry install.
+# You must install it separately in Step 1.3.5 below.
 ```
 
 **After installation, verify the venv was created with the correct Python:**
@@ -412,6 +415,32 @@ poetry install
 # Check Python version in the venv
 .venv/bin/python --version
 # Should show: Python 3.11.9
+```
+
+#### 1.3.5 Install Apache Airflow
+
+**IMPORTANT**: Apache Airflow is not included in the base Hammer dependencies. You must install it separately to get Airflow 3.1.0.
+
+```bash
+# Make sure you're in the Hammer directory
+cd /bwrcq/C/<username>/hammer
+
+# Activate the virtual environment first
+source .venv/bin/activate
+
+# Install Apache Airflow 3.1.0 using Poetry
+poetry add apache-airflow==3.1.0
+
+# Verify installation
+airflow version
+# Should show: Apache Airflow 3.1.0
+```
+
+**Note**: If you prefer to use pip instead of Poetry:
+```bash
+# With venv activated
+pip install apache-airflow==3.1.0
+airflow version  # Verify
 ```
 
 #### 1.4 Activate Virtual Environment and Initialize Airflow
