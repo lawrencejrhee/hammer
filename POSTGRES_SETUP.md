@@ -1,12 +1,24 @@
 # PostgreSQL Setup for SledgeHammer Airflow
 
-This document provides a complete guide for setting up Apache Airflow with PostgreSQL backend for the SledgeHammer VLSI design framework. This replaces the default SQLite backend to enable concurrent connections, parallel query execution, and multi-user operation.
+This document provides a **complete from-scratch guide** for setting up Apache Airflow with PostgreSQL backend for the SledgeHammer VLSI design framework. This replaces the default SQLite backend to enable concurrent connections, parallel query execution, and multi-user operation.
+
+**Important**: This guide assumes you have **nothing set up** and will walk you through every step, including:
+- Python installation (if needed)
+- GitHub SSH key setup
+- Cloning the Hammer repository
+- Installing Poetry and dependencies
+- PostgreSQL configuration
+- Airflow setup and configuration
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
 - [Complete Setup Process](#complete-setup-process)
+  - [Step 0: Install Python (If Not Already Installed)](#step-0-install-python-if-not-already-installed)
+  - [Step 0.3: Set Up GitHub SSH Access](#step-03-set-up-github-ssh-access)
+  - [Step 0.4: Create Working Directory](#step-04-create-working-directory)
+  - [Step 0.5: Clone Hammer Repository](#step-05-clone-hammer-repository)
   - [Step 1: Install Poetry and Dependencies](#step-1-install-poetry-and-dependencies)
   - [Step 2: Set Up PostgreSQL Connection](#step-2-set-up-postgresql-connection)
   - [Step 3: Configure Airflow](#step-3-configure-airflow)
@@ -44,23 +56,21 @@ PostgreSQL provides the foundation for:
    
    **Note**: Airflow should run on compute nodes, not the login server, to avoid resource conflicts. Any available compute node will work - `bwrcix-3` is just an example.
 
-2. **Working Directory**: Create your working directory (if it doesn't exist):
-   ```bash
-   mkdir -p /bwrcq/home/<username>/hammer
-   cd /bwrcq/home/<username>/hammer
-   ```
+2. **GitHub Account**: You need a GitHub account with SSH access configured (see Step 0.3 below).
 
-3. **PostgreSQL Server**: Access to a PostgreSQL server (currently configured for `barney.eecs.berkeley.edu:5433`)
+3. **Working Directory**: You will clone the Hammer repository to your working directory (see Step 0.5 below).
+
+4. **PostgreSQL Server**: Access to a PostgreSQL server (currently configured for `barney.eecs.berkeley.edu:5433`)
    
    **If the PostgreSQL server is down**, contact:
    - **Email**: anne_young@berkeley.edu
    - **System Admins**: bwrc-sysadmins@lists.eecs.berkeley.edu
 
-4. **Database**: A PostgreSQL database must exist (e.g., `airflow_<username>`)
+5. **Database**: A PostgreSQL database must exist (e.g., `airflow_<username>`)
 
-5. **Python 3.10-3.13**: Required for Airflow 3.1.0
+6. **Python 3.10-3.13**: Required for Airflow 3.1.0
 
-6. **Poetry**: Python dependency management tool
+7. **Poetry**: Python dependency management tool
 
 ## Complete Setup Process
 
@@ -104,6 +114,113 @@ If Python 3.10-3.13 is not already available on your system, you need to build i
 **Note**: On BWRC servers, if you don't have root access to install system packages, you may need to build Python from source as shown above. If you need system-level Python installation or root access, contact:
 - **Email**: anne_young@berkeley.edu
 - **System Admins**: bwrc-sysadmins@lists.eecs.berkeley.edu
+
+### Step 0.3: Set Up GitHub SSH Access
+
+**CRITICAL**: You must set up SSH access to GitHub before you can clone the Hammer repository. This step is required and must be completed on the BWRC server where you will be working.
+
+1. **Generate SSH Key** (if you don't already have one):
+   ```bash
+   ssh-keygen -t ed25519 -C "your_email@berkeley.edu"
+   ```
+   
+   - Press Enter to accept the default file location (`~/.ssh/id_ed25519`)
+   - Enter a passphrase (optional but recommended) or press Enter twice to skip
+   
+   **Note**: If you already have an SSH key, you can skip this step or generate a new one with a different name.
+
+2. **Start SSH Agent and Add Key**:
+   ```bash
+   eval "$(ssh-agent -s)"
+   ssh-add ~/.ssh/id_ed25519
+   ```
+   
+   If you used a different key name or location, adjust the path accordingly.
+
+3. **Copy Your Public Key**:
+   ```bash
+   cat ~/.ssh/id_ed25519.pub
+   ```
+   
+   This will display your public key. **Copy the entire output** (it should start with `ssh-ed25519` and end with your email).
+
+4. **Add SSH Key to GitHub**:
+   - Go to GitHub.com and log in
+   - Click your profile picture → **Settings**
+   - In the left sidebar, click **SSH and GPG keys**
+   - Click **New SSH key**
+   - Give it a title (e.g., "BWRC Server")
+   - Paste your public key into the "Key" field
+   - Click **Add SSH key**
+
+5. **Verify SSH Connection to GitHub**:
+   ```bash
+   ssh -T git@github.com
+   ```
+   
+   You should see a message like:
+   ```
+   Hi <username>! You've successfully authenticated, but GitHub does not provide shell access.
+   ```
+   
+   If you see a permission denied error, check that:
+   - Your public key was correctly copied to GitHub
+   - The SSH agent is running and has your key loaded
+   - You're using the correct key file
+
+**Troubleshooting**:
+- If `ssh-keygen` is not found, you may need to install OpenSSH
+- If authentication fails, verify your public key is correctly added to GitHub
+- For more detailed instructions, see [GitHub's SSH Key Guide](https://docs.github.com/en/authentication/connecting-to-github-with-ssh)
+
+### Step 0.4: Create Working Directory
+
+Before cloning the repository, create your working directory:
+
+```bash
+mkdir -p /bwrcq/C/<username>
+cd /bwrcq/C/<username>
+```
+
+**Note**: Replace `<username>` with your actual LDAP username. This directory will hold the Hammer repository and all your work files.
+
+### Step 0.5: Clone Hammer Repository
+
+**IMPORTANT**: You must clone the Hammer repository before proceeding with Poetry installation. The `pyproject.toml` file in the repository contains the correct dependencies needed for Airflow and PostgreSQL.
+
+**Prerequisites**: Make sure you have completed:
+- Step 0.3: Set Up GitHub SSH Access (required for cloning)
+- Step 0.4: Create Working Directory
+
+1. **Navigate to your working directory** (if not already there):
+   ```bash
+   cd /bwrcq/C/<username>
+   ```
+
+2. **Clone the Hammer repository**:
+   ```bash
+   git clone git@github.com:ucb-bar/hammer.git
+   cd hammer
+   ```
+
+   **Optional**: If you want to clone into a different directory name:
+   ```bash
+   git clone git@github.com:ucb-bar/hammer.git <directory name>
+   cd <directory name>
+   ```
+
+3. **Verify you're in the Hammer directory**:
+   ```bash
+   pwd
+   # Should show: /bwrcq/C/<username>/hammer
+   ls -la
+   # Should show pyproject.toml, poetry.lock, and other Hammer files
+   ```
+
+**Troubleshooting**:
+- If you get "Permission denied (publickey)" when cloning, go back to Step 0.3 and verify your SSH key is set up correctly
+- If you get "Host key verification failed", run: `ssh-keyscan github.com >> ~/.ssh/known_hosts`
+- If you prefer HTTPS instead of SSH, you can use: `git clone https://github.com/ucb-bar/hammer.git` (but SSH is recommended)
 
 ### Step 1: Install Poetry and Dependencies
 
@@ -243,7 +360,8 @@ poetry --version
 #### 1.2 Configure Poetry
 
 ```bash
-cd /bwrcq/home/<username>/hammer
+# Make sure you're in the Hammer directory (from Step 0.5)
+cd /bwrcq/C/<username>/hammer
 
 # Configure Poetry to create virtual environment in project directory
 poetry config virtualenvs.in-project true
@@ -331,7 +449,7 @@ Replace `<username>` with your actual username and `YOUR_PASSWORD` with your act
 #### 2.3 Test PostgreSQL Connection
 
 ```bash
-cd /bwrcq/home/<username>/hammer
+cd /bwrcq/C/<username>/hammer
 source .venv/bin/activate
 export AIRFLOW_HOME=$(pwd)
 
@@ -349,7 +467,7 @@ If connection fails, see [Troubleshooting](#troubleshooting) section.
 #### 3.1 Set Airflow Home
 
 ```bash
-export AIRFLOW_HOME=/bwrcq/home/<username>/hammer
+export AIRFLOW_HOME=/bwrcq/C/<username>/hammer
 # Or use current directory:
 export AIRFLOW_HOME=$(pwd)
 ```
@@ -373,7 +491,7 @@ Airflow 3.1.0 requires specific configuration for LocalExecutor to work properly
    parallelism = 1  # Start with 1, can increase later
    max_active_tasks_per_dag = 1  # Start with 1, can increase later
    executor = LocalExecutor
-   dags_folder = /bwrcq/home/<username>/hammer/dags
+   dags_folder = /bwrcq/C/<username>/hammer/dags
    ```
 
 3. **Database Connection Pooling** - Improve reliability
@@ -421,7 +539,7 @@ For your reference, here are the complete critical sections from `airflow.cfg` t
 executor = LocalExecutor
 
 # DAGs folder (update with your actual path)
-dags_folder = /bwrcq/home/<username>/hammer/dags
+dags_folder = /bwrcq/C/<username>/hammer/dags
 
 # Parallelism settings (start with 1, can increase later)
 parallelism = 1
@@ -479,7 +597,7 @@ airflow config get-value core executor
 #### 4.1 Check Database Status
 
 ```bash
-cd /bwrcq/home/<username>/hammer
+cd /bwrcq/C/<username>/hammer
 source .venv/bin/activate
 export AIRFLOW_HOME=$(pwd)
 
@@ -524,7 +642,7 @@ psql -h barney.eecs.berkeley.edu -p 5433 -U <username> -d airflow_<username> -c 
 Create an admin user for the Airflow web UI:
 
 ```bash
-cd /bwrcq/home/<username>/hammer
+cd /bwrcq/C/<username>/hammer
 source .venv/bin/activate
 export AIRFLOW_HOME=$(pwd)
 
@@ -557,7 +675,7 @@ ps aux | grep airflow | grep -v grep || echo "✓ No Airflow processes running"
 #### 6.2 Start Airflow Standalone (Recommended)
 
 ```bash
-cd /bwrcq/home/<username>/hammer
+cd /bwrcq/C/<username>/hammer
 source .venv/bin/activate
 export AIRFLOW_HOME=$(pwd)
 
@@ -571,7 +689,7 @@ Wait for the message: `Airflow is ready`
 
 **Terminal 1 - Scheduler:**
 ```bash
-cd /bwrcq/home/<username>/hammer
+cd /bwrcq/C/<username>/hammer
 source .venv/bin/activate
 export AIRFLOW_HOME=$(pwd)
 airflow scheduler
@@ -579,7 +697,7 @@ airflow scheduler
 
 **Terminal 2 - Webserver:**
 ```bash
-cd /bwrcq/home/<username>/hammer
+cd /bwrcq/C/<username>/hammer
 source .venv/bin/activate
 export AIRFLOW_HOME=$(pwd)
 airflow webserver --port 8090
@@ -638,7 +756,7 @@ sql_alchemy_conn = postgresql+psycopg2://username:password@host:port/database
 Set `AIRFLOW_HOME` to your Airflow directory:
 
 ```bash
-export AIRFLOW_HOME=/bwrcq/home/<username>/hammer
+export AIRFLOW_HOME=/bwrcq/C/<username>/hammer
 ```
 
 Or let scripts set it automatically (defaults to current directory).
@@ -649,7 +767,7 @@ Ensure `dags_folder` in `airflow.cfg` points to your DAGs:
 
 ```ini
 [core]
-dags_folder = /bwrcq/home/<username>/hammer/dags
+dags_folder = /bwrcq/C/<username>/hammer/dags
 ```
 
 ## Verification
@@ -685,7 +803,7 @@ airflow db shell
 To verify that metadata (task instances, DAG runs, logs) is being stored correctly:
 
 ```bash
-cd /bwrcq/home/<username>/hammer
+cd /bwrcq/C/<username>/hammer
 source .venv/bin/activate
 export AIRFLOW_HOME=$(pwd)
 
