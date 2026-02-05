@@ -428,20 +428,31 @@ cd /bwrcq/C/<username>/hammer
 # Activate the virtual environment first
 source .venv/bin/activate
 
-# Install Apache Airflow 3.1.0 using Poetry
-poetry add apache-airflow==3.1.0
+# Set Airflow home directory
+export AIRFLOW_HOME=$(pwd)
+echo "AIRFLOW home directory set to: $AIRFLOW_HOME"
+
+# Define versions
+AIRFLOW_VERSION=3.1.0
+PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+
+# Clean up doc-only packages that conflict with Airflow
+echo "Removing doc-related packages to avoid version conflicts..."
+pip uninstall -y myst-parser mdit-py-plugins markdown-it-py || true
+
+# Install Airflow with constraint file (ensures compatible dependencies)
+echo "Installing Apache Airflow ${AIRFLOW_VERSION} (Python ${PYTHON_VERSION})"
+pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "${CONSTRAINT_URL}"
+
+echo "Airflow installed successfully."
 
 # Verify installation
 airflow version
 # Should show: Apache Airflow 3.1.0
 ```
 
-**Note**: If you prefer to use pip instead of Poetry:
-```bash
-# With venv activated
-pip install apache-airflow==3.1.0
-airflow version  # Verify
-```
+**Note**: The constraint file ensures all Airflow dependencies are compatible versions. This is the recommended installation method from Apache Airflow.
 
 #### 1.4 Activate Virtual Environment and Initialize Airflow
 
