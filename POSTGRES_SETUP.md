@@ -347,8 +347,9 @@ typeCheckingMode = "standard"
 #### 1.1 Install Poetry
 
 ```bash
-# Install Poetry if not already installed
-curl -sSL https://install.python-poetry.org | python3 -
+# CRITICAL: Use the explicit Python 3.11.9 path to ensure Poetry is installed correctly
+# This ensures Poetry uses Python 3.11.9 instead of the system Python
+curl -sSL https://install.python-poetry.org | $HOME/python311/bin/python3 -
 
 # Add Poetry to PATH (add to ~/.bashrc for persistence)
 export PATH="$HOME/.local/bin:$PATH"
@@ -365,22 +366,52 @@ cd /bwrcq/C/<username>/hammer
 
 # Configure Poetry to create virtual environment in project directory
 poetry config virtualenvs.in-project true
+
+# CRITICAL: Explicitly tell Poetry to use Python 3.11.9 for the virtual environment
+# This ensures the venv is created with the correct Python version
+poetry env use $HOME/python311/bin/python3
+
+# Verify Poetry will use the correct Python
+poetry env info
+# Should show Python 3.11.9 in the output
 ```
 
 #### 1.3 Install Dependencies from poetry.lock
+
+**IMPORTANT**: Before running `poetry install`, verify that Poetry will use Python 3.11.9:
+
+```bash
+# Verify Python version that Poetry will use
+poetry run python --version
+# Should show: Python 3.11.9
+
+# If it shows a different version, run this again:
+poetry env use $HOME/python311/bin/python3
+poetry run python --version  # Verify again
+```
+
+Now install dependencies:
 
 ```bash
 # Install all dependencies including Airflow
 poetry install
 
 # This will:
-# - Create .venv directory in the project
+# - Create .venv directory in the project with Python 3.11.9
 # - Install all dependencies from poetry.lock
 # - Install Airflow 3.1.0 and required packages:
 #   - apache-airflow
 #   - psycopg2 (PostgreSQL adapter)
 #   - asyncpg (required by Airflow)
 #   - pydantic (>=2.12.2)
+```
+
+**After installation, verify the venv was created with the correct Python:**
+
+```bash
+# Check Python version in the venv
+.venv/bin/python --version
+# Should show: Python 3.11.9
 ```
 
 #### 1.4 Activate Virtual Environment and Initialize Airflow
