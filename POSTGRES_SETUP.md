@@ -20,6 +20,7 @@ This document provides a **complete from-scratch guide** for setting up Apache A
   - [Step 0.4: Create Working Directory](#step-04-create-working-directory)
   - [Step 0.5: Clone Hammer Repository](#step-05-clone-hammer-repository)
   - [Step 1: Install Poetry and Dependencies](#step-1-install-poetry-and-dependencies)
+    - [Step 1.3.1: Troubleshooting psycopg2 Installation Failure](#step-131-troubleshooting-psycopg2-installation-failure)
   - [Step 1.3.5: Install Apache Airflow](#step-135-install-apache-airflow)
   - [Step 2: Set Up PostgreSQL Connection](#step-2-set-up-postgresql-connection)
   - [Step 3: Configure Airflow](#step-3-configure-airflow)
@@ -416,6 +417,39 @@ poetry install
 .venv/bin/python --version
 # Should show: Python 3.11.9
 ```
+
+#### 1.3.1 Troubleshooting: psycopg2 Installation Failure
+
+If `poetry install` fails with an error like:
+
+```
+Error: pg_config executable not found.
+pg_config is required to build psycopg2 from source.
+```
+
+This means Poetry is trying to build `psycopg2` from source instead of using a pre-built wheel. **Do NOT switch to `psycopg2-binary`** - instead, manually install `psycopg2` using pip:
+
+```bash
+# First, activate the virtual environment
+source .venv/bin/activate
+
+# Install psycopg2 directly with pip (this uses cached wheels if available)
+pip install psycopg2==2.9.11
+
+# Verify it installed correctly
+python -c "import psycopg2; print('psycopg2 version:', psycopg2.__version__)"
+# Should show: psycopg2 version: 2.9.11 (dt dec pq3 ext lo64)
+
+# Now run poetry install again to install remaining dependencies
+poetry install
+```
+
+**Why this works**: `pip install psycopg2==2.9.11` will use cached wheel files (`.whl`) if they exist on your system, avoiding the need to compile from source. The BWRC servers typically have these wheels cached.
+
+**If pip also fails to install psycopg2**, contact system administrators to install PostgreSQL development libraries:
+- **Email**: anne_young@berkeley.edu
+- **System Admins**: bwrc-sysadmins@lists.eecs.berkeley.edu
+- **Request**: `libpq-dev` package (provides `pg_config` needed to build psycopg2 from source)
 
 #### 1.3.5 Install Apache Airflow
 
