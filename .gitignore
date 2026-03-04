@@ -21,6 +21,13 @@ __pycache__/
 # Wheels directory (not needed for from-source builds)
 wheels/
 
+# Chipyard (separate git repo, cloned during setup)
+chipyard/
+
+# Airflow generated files
+simple_auth_manager_passwords.json.generated
+standalone_admin_password.txt
+
 # IDE
 .vscode/
 .idea/

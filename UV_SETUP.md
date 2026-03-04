@@ -1,8 +1,15 @@
-# SledgeHammer Setup with uv (PostgreSQL + Airflow)
+# Chipyard + SledgeHammer Setup with uv (PostgreSQL + Airflow)
 
-This document provides a **complete from-scratch guide** for setting up Hammer with Apache Airflow and PostgreSQL using **[uv](https://github.com/astral-sh/uv)** instead of Poetry. `uv` is an extremely fast Python package manager written in Rust that replaces `pip`, `poetry`, `virtualenv`, and more.
+This document provides a **complete from-scratch guide** for setting up **Chipyard** with **Hammer (Sledgehammer)** VLSI framework, orchestrated by **Apache Airflow 3.x** with a **PostgreSQL** database backend, all managed by **[uv](https://github.com/astral-sh/uv)** instead of Poetry/Conda.
 
-**Why uv instead of Poetry?**
+**What this setup provides:**
+- **Chipyard**: RISC-V SoC design framework and build system
+- **Hammer (Sledgehammer)**: VLSI flow driver that runs synthesis, place-and-route, simulation, etc.
+- **Airflow 3.x**: Orchestrates the VLSI flow steps as DAGs (Directed Acyclic Graphs)
+- **PostgreSQL backend**: Production-grade database for Airflow enabling parallel execution
+- **uv**: Fast, modern Python package manager replacing pip/poetry/conda for Hammer deps
+
+**Why uv instead of Poetry/Conda?**
 - **10-100x faster** than pip/poetry for dependency resolution and installation
 - **Single tool**: replaces pip, poetry, virtualenv, and pyenv
 - **Simple installation**: one `curl` command, no Python bootstrap needed
@@ -12,7 +19,7 @@ This document provides a **complete from-scratch guide** for setting up Hammer w
 ## Table of Contents
 
 - [Prerequisites](#prerequisites)
-- [Complete Setup Process](#complete-setup-process)
+- [Part 1: Hammer + Airflow + PostgreSQL Setup](#part-1-hammer--airflow--postgresql-setup)
   - [Step 0: Install Python (If Not Already Installed)](#step-0-install-python-if-not-already-installed)
   - [Step 0.3: Set Up GitHub SSH Access](#step-03-set-up-github-ssh-access)
   - [Step 0.4: Create Working Directory](#step-04-create-working-directory)
@@ -25,10 +32,23 @@ This document provides a **complete from-scratch guide** for setting up Hammer w
   - [Step 5: Configure Airflow](#step-5-configure-airflow)
   - [Step 6: Initialize Database](#step-6-initialize-database)
   - [Step 7: Start Airflow](#step-7-start-airflow)
+- [Part 2: Chipyard Integration](#part-2-chipyard-integration)
+  - [Step 8: Clone Chipyard](#step-8-clone-chipyard)
+  - [Step 9: Chipyard Build Setup (Optional)](#step-9-chipyard-build-setup-optional)
+  - [Step 10: Modify Hammer Files for Airflow Compatibility](#step-10-modify-hammer-files-for-airflow-compatibility)
+  - [Step 11: Copy Sky130 PDK Files](#step-11-copy-sky130-pdk-files)
+  - [Step 12: Update Airflow Configuration for DAGs](#step-12-update-airflow-configuration-for-dags)
+  - [Step 13: Verify DAG Discovery](#step-13-verify-dag-discovery)
+- [Available DAGs](#available-dags)
+- [Usage](#usage)
 - [Daily Usage](#daily-usage)
+- [Relaunching (After Initial Setup)](#relaunching-after-initial-setup)
+- [Clearing / Resetting a DAG Run](#clearing--resetting-a-dag-run)
 - [uv Cheat Sheet (vs Poetry)](#uv-cheat-sheet-vs-poetry)
 - [Verification](#verification)
 - [Troubleshooting](#troubleshooting)
+- [All Modifications Summary](#all-modifications-summary)
+- [Directory Structure](#directory-structure)
 
 ---
 
@@ -61,7 +81,7 @@ This document provides a **complete from-scratch guide** for setting up Hammer w
 
 ---
 
-## Complete Setup Process
+## Part 1: Hammer + Airflow + PostgreSQL Setup
 
 ### Step 0: Install Python (If Not Already Installed)
 
@@ -414,8 +434,9 @@ Edit `airflow.cfg` with these critical settings:
 ```ini
 [core]
 executor = LocalExecutor
-parallelism = 1
-max_active_tasks_per_dag = 1
+parallelism = 30
+max_active_tasks_per_dag = 30
+# For basic setup, use a dags/ directory. For chipyard integration (Part 2), change to hammer/shell
 dags_folder = /bwrcq/C/<username>/hammer/dags
 
 [api]
@@ -508,13 +529,329 @@ Then open http://localhost:8080 in your browser.
 
 ---
 
+## Part 2: Chipyard Integration
+
+This section sets up Chipyard and configures Hammer's Airflow DAGs for the Sledgehammer VLSI flow. After completing Part 1, you have Hammer + Airflow + PostgreSQL working. Now we add:
+
+- Chipyard (cloned into the hammer directory)
+- Hammer source modifications for Airflow compatibility
+- Sky130 PDK files for the GCD demo
+- Sledgehammer DAGs (`Sledgehammer_demo_gcd`, `Sledgehammer_demo_rocket`)
+
+### Step 8: Clone Chipyard
+
+```bash
+cd /bwrcq/C/<username>/hammer
+git clone git@github.com:ucb-bar/chipyard.git chipyard
+```
+
+Add `chipyard/` to `.gitignore` (it's a separate git repository):
+
+```bash
+echo "chipyard/" >> .gitignore
+```
+
+### Step 9: Chipyard Build Setup (Optional)
+
+> **Note**: Chipyard's `build-setup.sh` initializes submodules, builds the RISC-V toolchain, and sets up the conda environment. This takes **30+ minutes** and requires **15GB+ disk space**. It is **only needed for chipyard-based designs** (e.g., RocketTile). The GCD demo uses Hammer's built-in `e2e/` test configs and does **not** require a built chipyard.
+
+If you need to build chipyard-based designs:
+
+```bash
+cd /bwrcq/C/<username>/hammer/chipyard
+
+# Source BWRC environment for EDA tool paths
+source /tools/C/ee290-sp25/bwrc-env.sh
+
+# Run build setup (skip FireSim steps 6-9)
+./build-setup.sh riscv-tools -s 6 -s 7 -s 8 -s 9
+```
+
+For just the GCD demo and Sledgehammer DAGs, **skip this step** — the chipyard clone is sufficient.
+
+### Step 10: Modify Hammer Files for Airflow Compatibility
+
+Several Hammer source files need modification to work correctly within Airflow. These changes are **required** — without them, tasks will crash the Airflow worker process or fail to execute.
+
+#### 10.1 Remove `sys.exit()` from `cli_driver.py`
+
+**File**: `hammer/vlsi/cli_driver.py` (at the bottom of the file)
+
+**Problem**: `CLIDriver.main()` calls `sys.exit()` at the end of execution. This terminates the entire Python process, which in Airflow's case is the worker — causing the task to be marked as `failed` even if the VLSI step succeeded.
+
+**Fix**: Replace the last two lines:
+
+```python
+# Change from:
+#     sys.exit(1)
+# To:
+      return 1
+
+# Change from:
+#     sys.exit(self.run_main_parsed(vars(parser.parse_args(args))))
+# To:
+      return self.run_main_parsed(vars(parser.parse_args(args)))
+```
+
+#### 10.2 Replace `hammer_vlsi.py` with DAG definitions
+
+**File**: `hammer/shell/hammer_vlsi.py`
+
+The stock `hammer_vlsi.py` is a 9-line script that just calls `CLIDriver().main()`. Replace it entirely with the Sledgehammer DAG definitions that define the `Sledgehammer_demo_gcd` and `Sledgehammer_demo_rocket` DAGs.
+
+The modified file includes:
+- **`run_cli_driver()` wrapper**: Catches `SystemExit` from `CLIDriver().main()` to prevent killing the Airflow worker
+- **`get_param()` helper**: Reads DAG parameters from `conf` (runtime) or `params` (defaults), fixing the issue where triggering without config skips all tasks
+- **`AIRFlow` class**: GCD demo configuration with absolute paths to `e2e/` configs
+- **`AIRFlow_rocket` class**: RocketTile demo configuration
+- **Two DAG definitions**: `Sledgehammer_demo_gcd` and `Sledgehammer_demo_rocket` with branching task flows
+
+**Important**: Update the absolute paths in the `AIRFlow` and `AIRFlow_rocket` classes to match your installation:
+
+```python
+# In AIRFlow.__init__():
+self.vlsi_dir = '/bwrcq/C/<username>/hammer/e2e'  # ← your path
+
+# In AIRFlow_rocket.__init__():
+self.vlsi_dir = '/bwrcq/C/<username>/hammer/e2e'   # ← your path
+self.specs_abs = '/bwrcq/C/<username>/hammer/specs' # ← your path
+```
+
+> **Tip**: You can copy the modified `hammer_vlsi.py` from a reference setup (e.g., `/bwrcq/home/lawrencejrhee/hammer_uv/hammer/shell/hammer_vlsi.py`) and only update the absolute paths.
+
+#### 10.3 Comment out QRC tech file in Genus (RHEL 9 workaround)
+
+**File**: `hammer/synthesis/genus/__init__.py` (around line 231)
+
+**Problem**: Cadence Genus fails with `error while loading shared libraries: libnsl.so.1` on RHEL 9 systems.
+
+**Fix**: Comment out lines ~231–233:
+
+```python
+# Commented out QRC tech file setting - may cause issues if QRC is needed in the future
+# if len(qrc_files) > 0:
+#     verbose_append("set_db qrc_tech_file {{ {files} }}".format(
+#         files=qrc_files[0]
+#     ))
+```
+
+#### 10.4 Update e2e config files with absolute paths
+
+Airflow workers do not execute from the `e2e/` directory, so all source file references must use **absolute paths**.
+
+**File**: `e2e/configs-design/gcd/common.yml`
+
+```yaml
+synthesis.inputs:
+  top_module: "gcd"
+  input_files:
+    - "/bwrcq/C/<username>/hammer/e2e/src/gcd.v"
+```
+
+**File**: `e2e/configs-design/gcd/sim-rtl.yml`
+
+```yaml
+sim.inputs:
+  level: "rtl"
+  input_files:
+    - "/bwrcq/C/<username>/hammer/e2e/src/gcd.v"
+    - "/bwrcq/C/<username>/hammer/e2e/src/gcd_tb.v"
+```
+
+### Step 11: Copy Sky130 PDK Files
+
+Copy Sky130 PDK files from a reference setup:
+
+```bash
+SRC=/bwrcq/C/bandk1451/chipyard-sledgehammer-br-airflow3/chipyard/vlsi/hammer/hammer/technology/sky130
+DST=/bwrcq/C/<username>/hammer/hammer/technology/sky130
+
+cp $SRC/__init__.py $DST/__init__.py
+cp $SRC/sram-cache.json $DST/sram-cache.json
+mkdir -p $DST/sram_compiler
+cp $SRC/sram_compiler/__init__.py $DST/sram_compiler/__init__.py
+
+# Verify
+ls $DST/__init__.py $DST/sram-cache.json $DST/sram_compiler/__init__.py
+```
+
+### Step 12: Update Airflow Configuration for DAGs
+
+Now that the DAGs are in `hammer/shell/hammer_vlsi.py`, update `airflow.cfg`:
+
+#### 12.1 Point `dags_folder` to hammer/shell
+
+```ini
+[core]
+dags_folder = /bwrcq/C/<username>/hammer/hammer/shell
+```
+
+#### 12.2 Add Security Keys (CRITICAL for Airflow 3.x)
+
+Without these, the scheduler cannot communicate with the API server and **all tasks will fail** with `Invalid auth token: Signature verification failed`.
+
+Generate keys:
+
+```bash
+# Generate Fernet key
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Generate secret key
+python -c "import secrets; import base64; print(base64.b64encode(secrets.token_bytes(16)).decode())"
+
+# Generate JWT secret
+python -c "import secrets; import base64; print(base64.b64encode(secrets.token_bytes(16)).decode())"
+```
+
+Add to `airflow.cfg`:
+
+```ini
+[core]
+fernet_key = <your_generated_fernet_key>
+internal_api_secret_key = <your_generated_secret_key>
+
+[api]
+secret_key = <same_as_internal_api_secret_key>  # MUST match internal_api_secret_key
+
+[api_auth]
+jwt_secret = <your_generated_jwt_secret>
+```
+
+> **CRITICAL**: `internal_api_secret_key` and `secret_key` **must be the same value**. If they don't match, tasks will crash immediately with signature verification errors.
+
+#### 12.3 Run DB Migrate
+
+```bash
+source venv.sh
+airflow db migrate
+```
+
+### Step 13: Verify DAG Discovery
+
+```bash
+source venv.sh
+
+# Reserialize DAGs
+airflow dags reserialize
+
+# List DAGs
+airflow dags list | grep Sledgehammer
+# Should show:
+# Sledgehammer_demo_gcd
+# Sledgehammer_demo_rocket
+
+# Check for import errors
+airflow dags list-import-errors
+# Should show: No data found
+```
+
+---
+
+## Available DAGs
+
+### Sledgehammer_demo_gcd
+
+GCD (Greatest Common Divisor) design workflow.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `clean` | boolean | `False` | Clean the build directory |
+| `build` | boolean | `True` | Run the build step |
+| `sim_rtl` | boolean | `True` | Run RTL simulation |
+| `syn` | boolean | `True` | Run logic synthesis |
+| `par` | boolean | `True` | Run place and route |
+
+**Default config**: design=`gcd`, PDK=`sky130`, tools=`cm`, env=`bwrc`
+
+### Sledgehammer_demo_rocket
+
+RocketTile design workflow (includes SRAM generation step).
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `clean` | boolean | `False` | Clean the build directory |
+| `build` | boolean | `True` | Run the build step |
+| `sim_rtl` | boolean | `True` | Run RTL simulation |
+| `sram_generator` | boolean | `True` | Generate SRAM macros |
+| `syn` | boolean | `True` | Run logic synthesis |
+| `par` | boolean | `True` | Run place and route |
+
+**Default config**: design=`intel2x2`, PDK=`intech22`, tools=`cm`, env=`intel2x2`
+
+### DAG Task Flow
+
+```
+start → clean → build_decider ──→ build → sim_or_syn_decide ──→ sim_rtl → exit_
+                     │                            │
+                     │                            └──→ syn_decider → syn → par_decider → par → exit_
+                     │
+                     └──→ exit_ (if no steps enabled)
+```
+
+The Rocket DAG adds `sram_decider → sram_generator` between `sim_or_syn_decide` and `syn_decider`.
+
+### IMPORTANT: `sim_rtl` and `syn/par` are mutually exclusive
+
+The `sim_or_syn_decide` branch checks `sim_rtl` **first**. If `sim_rtl=True`, it takes the simulation path and **skips** synthesis/PAR. To run synthesis and PAR, set `sim_rtl=False`.
+
+---
+
+## Usage
+
+### Triggering DAGs via CLI
+
+```bash
+source venv.sh
+
+# GCD - Full default flow (build + sim_rtl)
+airflow dags trigger Sledgehammer_demo_gcd
+
+# GCD - Build + Synthesis + PAR (skip sim)
+airflow dags trigger Sledgehammer_demo_gcd --conf '{"sim_rtl": false}'
+
+# GCD - Build only
+airflow dags trigger Sledgehammer_demo_gcd --conf '{"sim_rtl": false, "syn": false, "par": false}'
+
+# GCD - Full flow with clean
+airflow dags trigger Sledgehammer_demo_gcd --conf '{"clean": true}'
+
+# Rocket - Build + SRAM + Synthesis
+airflow dags trigger Sledgehammer_demo_rocket --conf '{"sim_rtl": false}'
+```
+
+### Triggering via Web UI
+
+1. Open browser to `http://localhost:8080`
+2. Find your DAG in the list
+3. Unpause the DAG (toggle the switch)
+4. Click the **Play** button (▶)
+5. (Optional) Enter JSON config: `{"sim_rtl": false, "syn": true, "par": true}`
+6. Click "Trigger"
+
+### Checking Status
+
+```bash
+source venv.sh
+
+# List DAGs
+airflow dags list
+
+# Check import errors
+airflow dags list-import-errors
+
+# Check task states for a run
+airflow tasks states-for-dag-run Sledgehammer_demo_gcd "<run_id>"
+```
+
+---
+
 ## Daily Usage
 
 ### Quick Start (after initial setup)
 
 ```bash
 cd /bwrcq/C/<username>/hammer
-source venv.sh    # activates venv + sets AIRFLOW_HOME + adds uv to PATH
+source venv.sh    # activates venv + sets AIRFLOW_HOME + sources BWRC env
 airflow standalone
 ```
 
@@ -531,11 +868,58 @@ export AIRFLOW_HOME=$(pwd)
 # Ensure uv and pg_config are on PATH
 export PATH="$HOME/pg_local/usr/bin:$HOME/.local/bin:$PATH"
 
+# Source BWRC environment for EDA tools (VCS, Genus, Innovus, etc.)
+if [ -f /tools/C/ee290-sp25/bwrc-env.sh ]; then
+    source /tools/C/ee290-sp25/bwrc-env.sh
+    echo "BWRC EDA environment sourced."
+fi
+
 echo "Virtual environment activated."
 echo "AIRFLOW_HOME set to: $AIRFLOW_HOME"
 ```
 
 Usage: `source venv.sh`
+
+---
+
+## Relaunching (After Initial Setup)
+
+```bash
+# 1. Navigate to hammer directory
+cd /bwrcq/C/<username>/hammer
+
+# 2. Source the convenience script
+source venv.sh
+
+# 3. Start Airflow
+airflow standalone
+
+# Check password in: simple_auth_manager_passwords.json.generated
+```
+
+---
+
+## Clearing / Resetting a DAG Run
+
+### Clear all runs for a DAG
+
+```bash
+source venv.sh
+airflow tasks clear Sledgehammer_demo_gcd --yes
+```
+
+### Delete all DAG run history (fresh start)
+
+```bash
+airflow dags delete Sledgehammer_demo_gcd --yes
+# The DAG will be re-imported on the next scheduler scan
+```
+
+### Via Web UI
+
+1. Go to the DAG's Grid view
+2. Click on the specific DAG run
+3. Click "Clear" to reset all tasks in that run
 
 ---
 
@@ -682,17 +1066,155 @@ airflow api-server --port 8090
 airflow db migrate
 ```
 
+### Tasks fail with "Invalid auth token: Signature verification failed"
+
+**Cause**: One or more security keys in `airflow.cfg` are missing or inconsistent.
+
+**Fix (check in order)**:
+1. Ensure `fernet_key`, `internal_api_secret_key`, and `secret_key` are all set (see [Step 12.2](#122-add-security-keys-critical-for-airflow-3x))
+2. Ensure `internal_api_secret_key` and `secret_key` are the **same value**
+3. Add `[api_auth] jwt_secret` if missing
+
+### Tasks fail with "hammer-shell-test returned non-zero exit status" or "No module named 'hammer'"
+
+**Cause**: The `hammer` package is not discoverable. The editable install `.pth` file may be stale.
+
+**Fix**:
+```bash
+cd /bwrcq/C/<username>/hammer
+uv pip install -e .
+hammer-shell-test
+# Should print: "hammer-shell appears to be on the path"
+```
+
+### Tasks crash with `RecursionError: maximum recursion depth exceeded`
+
+**Cause**: The `run_cli_driver()` wrapper is calling itself instead of `CLIDriver().main()`.
+
+**Fix**: Ensure `run_cli_driver()` calls `CLIDriver().main()` internally, NOT `run_cli_driver()`.
+
+### `syn`, `par` tasks are skipped even though they're set to True
+
+**This is expected.** The `sim_or_syn_decide` branch treats `sim_rtl` and `syn/par` as **mutually exclusive**. To run syn/par:
+
+```bash
+airflow dags trigger Sledgehammer_demo_gcd --conf '{"sim_rtl": false}'
+```
+
+### `genus: error while loading shared libraries: libnsl.so.1`
+
+**Workaround**: Comment out QRC tech file lines in `hammer/synthesis/genus/__init__.py` (see [Step 10.3](#103-comment-out-qrc-tech-file-in-genus-rhel-9-workaround)).
+
+### DAGs not appearing
+
+1. Check import errors: `airflow dags list-import-errors`
+2. Verify `dags_folder` in `airflow.cfg` points to `hammer/shell/`
+3. Test import manually: `python3 hammer/shell/hammer_vlsi.py`
+4. Verify hammer is importable: `python3 -c "from hammer.vlsi import CLIDriver"`
+5. Run `airflow dags reserialize` to force a re-scan
+
+### `airflow db init` doesn't work
+
+Airflow 3.x removed `db init`. Use `airflow db migrate` instead — it's idempotent and safe to run any number of times.
+
 ### Want to Reset Everything
 
 ```bash
 cd /bwrcq/C/<username>/hammer
-rm -rf .venv uv.lock airflow.cfg logs/
+rm -rf .venv uv.lock airflow.cfg logs/ chipyard/
 export PATH="$HOME/pg_local/usr/bin:$HOME/.local/bin:$PATH"
 uv venv --python $HOME/python311/bin/python3
 uv lock
 uv sync --group dev
-# Then re-do Steps 3-6
+# Then re-do Steps 3-7 and Part 2
 ```
+
+---
+
+## All Modifications Summary
+
+### Files Modified from Stock Hammer
+
+| File | Change | Why |
+|------|--------|-----|
+| `pyproject.toml` | Converted from Poetry to PEP 621 for uv | uv compatibility |
+| `hammer/vlsi/cli_driver.py` | `sys.exit(1)` → `return 1`; `sys.exit(self.run_main_parsed(...))` → `return self.run_main_parsed(...)` | Prevent `sys.exit()` from killing Airflow workers |
+| `hammer/shell/hammer_vlsi.py` | Replaced with Sledgehammer DAG definitions (GCD + Rocket) | Airflow DAG file |
+| `hammer/synthesis/genus/__init__.py` | Commented out QRC tech file lines ~231-233 | Workaround for missing `libnsl.so.1` on RHEL 9 |
+| `hammer/technology/sky130/__init__.py` | Copied from reference setup | Sky130 PDK compatibility |
+| `hammer/technology/sky130/sram-cache.json` | Copied from reference setup | Sky130 SRAM definitions |
+| `hammer/technology/sky130/sram_compiler/__init__.py` | Copied from reference setup | Sky130 SRAM compiler |
+| `e2e/configs-design/gcd/common.yml` | Relative paths → absolute paths | Airflow workers don't run from e2e/ |
+| `e2e/configs-design/gcd/sim-rtl.yml` | Relative paths → absolute paths | Airflow workers don't run from e2e/ |
+| `airflow.cfg` | dags_folder, security keys, PostgreSQL connection | Airflow configuration |
+| `.gitignore` | Added chipyard/, airflow.cfg, logs/, wheels/ | Git cleanliness |
+| `venv.sh` | Created convenience script | Easy environment activation |
+
+---
+
+## Directory Structure
+
+```
+hammer/                               # AIRFLOW_HOME
+├── airflow.cfg                       # Airflow configuration (CRITICAL)
+├── pyproject.toml                    # PEP 621 project config (for uv)
+├── uv.lock                           # uv lockfile
+├── .venv/                            # Virtual environment
+├── venv.sh                           # Convenience activation script
+├── chipyard/                         # Chipyard repository (cloned in Step 8)
+├── logs/                             # Airflow task logs
+├── simple_auth_manager_passwords...  # Auto-generated admin password
+├── hammer/                           # Hammer Python package
+│   ├── shell/
+│   │   └── hammer_vlsi.py            # ★ DAG definitions (Sledgehammer_demo_gcd, _rocket)
+│   ├── vlsi/
+│   │   └── cli_driver.py             # ★ CLIDriver (modified: sys.exit → return)
+│   ├── synthesis/
+│   │   └── genus/
+│   │       └── __init__.py           # ★ Genus plugin (modified: QRC workaround)
+│   └── technology/
+│       └── sky130/                   # ★ Sky130 PDK files (copied from reference)
+└── e2e/                              # End-to-end configs
+    ├── configs-env/                  # Environment configs (bwrc-env.yml)
+    ├── configs-pdk/                  # PDK configs (sky130.yml)
+    ├── configs-tool/                 # Tool configs (cm.yml)
+    ├── configs-design/               # Design configs
+    │   └── gcd/
+    │       ├── common.yml            # ★ Design config (absolute paths)
+    │       ├── sim-rtl.yml           # ★ Simulation config (absolute paths)
+    │       ├── syn.yml               # Synthesis config
+    │       └── sky130.yml            # PDK-specific design config
+    └── src/
+        ├── gcd.v                     # GCD design source
+        └── gcd_tb.v                  # GCD testbench
+```
+
+Files marked with ★ were modified from the stock Hammer repository.
+
+---
+
+## Best Practices
+
+1. **All 4 security keys**: Always set `fernet_key`, `internal_api_secret_key`, `secret_key`, AND `jwt_secret`
+2. **Port consistency**: `[api] base_url` must match the actual port Airflow runs on
+3. **Source BWRC env**: Always source the EDA tool environment before starting Airflow
+4. **Set AIRFLOW_HOME**: Every terminal that runs `airflow` commands must have `AIRFLOW_HOME` set
+5. **No `sys.exit()` in tasks**: Never use `sys.exit()` in Airflow task code
+6. **Use absolute paths in YAML configs**: Airflow workers don't run from the e2e directory
+7. **Understand `sim_rtl` vs `syn/par` exclusivity**: The DAG branches — you can run sim OR syn/par, not both
+8. **Use `airflow db migrate` freely**: It's idempotent — safe to run anytime
+9. **Verify editable installs after moving repos**: Re-run `uv pip install -e .` if you move the directory
+
+---
+
+## References
+
+- [Chipyard Documentation](https://chipyard.readthedocs.io/)
+- [Hammer VLSI Documentation](https://hammer-vlsi.readthedocs.io/)
+- [Apache Airflow 3.x Documentation](https://airflow.apache.org/docs/)
+- [uv Documentation](https://docs.astral.sh/uv/)
+- [PostgreSQL Documentation](https://www.postgresql.org/docs/)
+- [psycopg2 Documentation](https://www.psycopg.org/docs/)
 
 ---
 
@@ -709,7 +1231,7 @@ For issues specific to SledgeHammer PostgreSQL integration:
 ---
 
 **Author**: Lawrence Rhee  
-**Date**: March 3, 2026  
+**Date**: March 4, 2026  
 **Airflow Version**: 3.1.0  
 **uv Version**: 0.10.8+  
 **PostgreSQL Version**: 13.22 (on server)  

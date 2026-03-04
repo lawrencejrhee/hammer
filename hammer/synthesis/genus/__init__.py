@@ -228,10 +228,11 @@ class Genus(HammerSynthesisTool, CadenceTool):
         qrc_files = self.technology.read_libs([
             hammer_tech.filters.qrc_tech_filter
         ], hammer_tech.HammerTechnologyUtils.to_plain_item)
-        if len(qrc_files) > 0:
-            verbose_append("set_db qrc_tech_file {{ {files} }}".format(
-                files=qrc_files[0]
-            ))
+        # Commented out QRC tech file setting - may cause issues if QRC is needed in the future
+        # if len(qrc_files) > 0:
+        #     verbose_append("set_db qrc_tech_file {{ {files} }}".format(
+        #         files=qrc_files[0]
+        #     ))
 
         # Quit when ispatial is used with sky130
         if(not qrc_files and self.get_setting("synthesis.genus.phys_flow_effort").lower() == "high"):

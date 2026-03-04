@@ -1722,6 +1722,6 @@ class CLIDriver:
         if output != "hammer-shell appears to be on the path":
             print("hammer-shell does not appear to be on the path (hammer-shell-test failed to run: %s)" % (output),
                   file=sys.stderr)
-            sys.exit(1)
+            return 1
 
-        sys.exit(self.run_main_parsed(vars(parser.parse_args(args))))
+        return self.run_main_parsed(vars(parser.parse_args(args)))
