@@ -12,7 +12,7 @@ synopsys.MGLS_LICENSE_FILE: "1717@bwrcflex-1.eecs.berkeley.edu:1717@bwrcflex-2.e
 
 # Commercial tool versions
 synthesis.genus.version: "231_ISR2"
-par.innovus.version: "231_ISR2"
+par.innovus.version: "251"
 power.joules.version: "231_ISR2"
 sim.vcs.version: "W-2024.09-1"
 

@@ -8,6 +8,7 @@ from itertools import chain
 
 import os
 import errno
+import re
 
 from hammer.utils import get_or_else, optional_map
 from hammer.vlsi import HammerTool, HammerPlaceAndRouteTool, HammerToolStep, HammerToolHookAction, \
@@ -23,6 +24,513 @@ from hammer.common.cadence import CadenceTool
 # Notes: camelCase commands are the old syntax (deprecated)
 # snake_case commands are the new/common UI syntax.
 # This plugin should only use snake_case commands.
+
+class InnovusTclToPythonConverter:
+    """Converts Innovus TCL scripts to Python following Innovus 25.1 Python API rules"""
+    
+    # Python reserved keywords that need _option_ prefix
+    RESERVED_KEYWORDS = {
+        'False', 'break', 'for', 'not', 'None', 'class', 'from', 'or', 
+        'True', 'continue', 'global', 'pass', 'def', 'if', 'raise', 
+        'and', 'del', 'import', 'return', 'as', 'elif', 'in', 'try', 
+        'assert', 'else', 'is', 'while', 'async', 'except', 'lambda', 
+        'with', 'await', 'finally', 'nonlocal', 'yield'
+    }
+    
+    # Commands that should use tcl.eval() to avoid issues
+    FALLBACK_TO_TCL = {
+        'write_db',  # Can segfault in Python
+        'ln',        # Shell command
+        'source',    # Source TCL files
+        'exit'       # Exit command
+    }
+    
+    # Commands where output file is positional (not named)
+    POSITIONAL_OUTPUT_CMDS = {
+        'write_stream': True,
+        'write_sdf': True,
+        'write_def': True,
+        'write_netlist': True,
+        'write_parasitics': True
+    }
+    
+    def __init__(self):
+        self.output_lines = []
+
+    def _is_register_file_io_block(self, lines: List[str], start_idx: int) -> Tuple[bool, int]:
+        """
+        Detect register file I/O blocks - these must be wrapped entirely in tcl.eval()
+        
+        Pattern to match:
+            set VAR "./find_regs_*.json"
+            set VAR [open $VAR "w"]
+            puts $VAR ...
+            ... (complex TCL code including for-loops)
+            close $VAR
+        """
+        if start_idx >= len(lines):
+            return False, start_idx
+        
+        line = lines[start_idx].strip()
+        
+        # Must start with 'set ' (after stripping whitespace)
+        if not line.startswith('set '):
+            return False, start_idx
+        
+        # Must contain .json
+        if '.json' not in line:
+            return False, start_idx
+        
+        # Must be a find_regs file (cells, paths, or regs)
+        if 'find_regs' not in line:
+            return False, start_idx
+        
+        # Extract variable name
+        parts = line.split()
+        if len(parts) < 3:
+            return False, start_idx
+        
+        var_name = parts[1]
+        
+        # Search for matching close statement
+        # Increased range to 30 lines to handle larger blocks
+        end_idx = start_idx + 1
+        found_close = False
+        
+        while end_idx < len(lines) and (end_idx - start_idx) < 30:
+            current = lines[end_idx].strip()
+            
+            # Look for: close $VAR or close VAR
+            if current.startswith('close '):
+                # Check if variable name appears in close statement
+                if var_name in current or f'${var_name}' in current:
+                    found_close = True
+                    break
+            
+            end_idx += 1
+        
+        # DEBUG: Uncomment to trace detection
+        # if found_close:
+        #     print(f"DEBUG: Detected file I/O block: '{var_name}' from line {start_idx+1} to {end_idx+1}")
+        
+        return found_close, end_idx if found_close else start_idx
+
+
+    def _wrap_block_in_tcl_eval(self, lines: List[str], start_idx: int, end_idx: int) -> str:
+        """Wrap TCL block in tcl.eval() with proper backslash handling"""
+        block_lines = []
+        
+        for i in range(start_idx, end_idx + 1):
+            line = lines[i].rstrip()
+            if line:
+                block_lines.append(line)
+        
+        tcl_block = '\n'.join(block_lines)
+        
+        # Use raw string (r'''...''') to preserve backslashes!
+        return f"tcl.eval(r'''{tcl_block}''')"  # ← Note the 'r' prefix!
+
+        
+    def convert_tcl_to_python(self, tcl_content: str) -> str:
+        """Convert TCL content to Python string"""
+        self.output_lines = []
+        
+        # Add header
+        self.output_lines.append("# " + "=" * 78)
+        self.output_lines.append("# Auto-converted from TCL to Python for Innovus 25.1")
+        self.output_lines.append("# " + "=" * 78)
+        self.output_lines.append("")
+        
+        tcl_lines = tcl_content.split('\n')
+        
+        i = 0
+        while i < len(tcl_lines):
+            line = tcl_lines[i].rstrip()
+            
+            # Check if this is the start of a register file I/O block
+            is_file_io, end_idx = self._is_register_file_io_block(tcl_lines, i)
+            
+            if is_file_io:
+                # Wrap the entire block in tcl.eval()
+                self.output_lines.append("# Complex file I/O block - using tcl.eval()")
+                tcl_eval_line = self._wrap_block_in_tcl_eval(tcl_lines, i, end_idx)
+                self.output_lines.append(tcl_eval_line)
+                self.output_lines.append("")
+                i = end_idx + 1
+                continue
+            
+            # Handle multi-line commands
+            full_line = line
+            while i + 1 < len(tcl_lines) and (line.endswith('\\\\') or self._has_unclosed_braces(full_line)):
+                i += 1
+                line = tcl_lines[i].rstrip()
+                full_line += ' ' + line.lstrip()
+            
+            converted = self.convert_line(full_line)
+            if converted:
+                self.output_lines.append(converted)
+            
+            i += 1
+        
+        return '\n'.join(self.output_lines)
+    
+    def _has_unclosed_braces(self, line: str) -> bool:
+        """Check if line has unclosed braces"""
+        open_count = line.count('{')
+        close_count = line.count('}')
+        return open_count > close_count
+    
+    def convert_line(self, line: str) -> str:
+        """Convert a single TCL line to Python"""
+        line = line.strip()
+        
+        # Skip empty lines and pure comments
+        if not line or line.startswith('#'):
+            if line.startswith('#'):
+                return line
+            return ''
+        
+        # Handle 'puts' statements
+        if line.startswith('puts '):
+            return self._convert_puts(line)
+        
+        # Handle 'close' command
+        if line.startswith('close '):
+            var_name = line.split()[1].strip('$')
+            return f"{var_name}.close()"
+        
+        # Handle 'open' command
+        if 'open ' in line and ('[open' in line or line.startswith('set ')):
+            return self._convert_file_open(line)
+        
+        # Check if this is a command we should fallback to tcl.eval()
+        cmd_name = self._extract_command_name(line)
+        if cmd_name in self.FALLBACK_TO_TCL or cmd_name.startswith('ln '):
+            escaped_line = line.replace('\\', '\\\\').replace("'", "\\'")
+            return f"tcl.eval('{escaped_line}')"
+        
+        # Handle set_db commands
+        if line.startswith('set_db '):
+            return self._convert_set_db(line)
+        
+        # Handle get_db -> db() conversions
+        if 'get_db' in line:
+            return self._convert_get_db_line(line)
+        
+        # Handle regular commands
+        if self._is_command(line):
+            return self._convert_command(line)
+        
+        # Handle TCL control structures
+        if line.startswith('if {') or line.startswith('for {') or line.startswith('while {'):
+            escaped_line = line.replace('\\', '\\\\').replace("'", "\\'")
+            return f"tcl.eval('{escaped_line}')"
+        
+        # Handle variable assignments
+        if line.startswith('set '):
+            return self._convert_variable_assignment(line)
+        
+        # Default fallback: wrap in tcl.eval()
+        escaped_line = line.replace('\\', '\\\\').replace("'", "\\'")
+        return f"tcl.eval('{escaped_line}')"
+    
+    def _convert_puts(self, line: str) -> str:
+        """Convert TCL puts to Python print"""
+        if line.startswith('puts "'):
+            content = line[6:-1]
+            content = content.replace('"', '\\"')
+            return f'print("{content}")'
+        
+        match = re.match(r'puts\s+(.+)', line)
+        if match:
+            var_expr = match.group(1).strip()
+            
+            # Handle file handle: puts $file_handle "content"
+            if ' "' in var_expr or " '" in var_expr:
+                parts = var_expr.split(maxsplit=1)
+                file_var = parts[0].strip('$')
+                content = parts[1].strip('"\'')
+                content = content.replace('"', '\\"')
+                return f'{file_var}.write("{content}\\n")'
+            
+            if var_expr.startswith('$'):
+                var_name = var_expr[1:]
+                return f'print({var_name})'
+            
+            return f'print({var_expr})'
+        
+        return f"print({line[5:]})"
+    
+    def _convert_file_open(self, line: str) -> str:
+        """Convert TCL file open to Python open()"""
+        match = re.match(r'set\s+(\w+)\s+\[open\s+"([^"]+)"\s+"([^"]+)"\]', line)
+        if match:
+            var_name = match.group(1)
+            filename = match.group(2)
+            mode = match.group(3)
+            return f'{var_name} = open("{filename}", "{mode}")'
+        
+        match = re.match(r'set\s+(\w+)\s+\[open\s+\$(\w+)\s+"([^"]+)"\]', line)
+        if match:
+            var_name = match.group(1)
+            filename_var = match.group(2)
+            mode = match.group(3)
+            return f'{var_name} = open({filename_var}, "{mode}")'
+        
+        escaped_line = line.replace('\\', '\\\\').replace("'", "\\'")
+        return f"tcl.eval('{escaped_line}')"
+    
+    def _extract_command_name(self, line: str) -> str:
+        """Extract the command name from a line"""
+        parts = line.split()
+        if parts:
+            return parts[0]
+        return ''
+    
+    def _is_command(self, line: str) -> bool:
+        """Check if line is a Innovus command"""
+        tcl_keywords = {'if', 'for', 'while', 'foreach', 'proc', 'set'}
+        cmd = self._extract_command_name(line)
+        return cmd and cmd not in tcl_keywords
+    
+    def _convert_set_db(self, line: str) -> str:
+        """Convert set_db commands to Python db() attribute access"""
+        match = re.match(r'set_db\s+(\S+)\s+(.+)', line)
+        if match:
+            attr_name = match.group(1)
+            value = match.group(2).strip()
+            py_value = self._convert_value(value)
+            return f"db().{attr_name} = {py_value}"
+        
+        return f"# FIXME: Could not convert: {line}"
+    
+    def _convert_get_db_line(self, line: str) -> str:
+        """Convert lines containing get_db to use db() API"""
+        # Pattern: set var [get_db objects pattern]
+        match = re.match(r'set\s+(\w+)\s+\[get_db\s+(\w+)\s+([^\]]+)\]', line)
+        if match:
+            var_name = match.group(1)
+            obj_type = match.group(2)
+            pattern = match.group(3).strip()
+            
+            if '-if' in pattern:
+                escaped_line = line.replace('\\', '\\\\').replace("'", "\\'")
+                return f"{var_name} = tcl.eval('{escaped_line}').split()"
+            
+            if pattern.startswith('{') and pattern.endswith('}'):
+                pattern = pattern[1:-1]
+            
+            pattern = pattern.strip('"\'')
+            return f"{var_name} = db().{obj_type}('{pattern}')"
+        
+        if '[get_db' in line:
+            escaped_line = line.replace('\\', '\\\\').replace("'", "\\'")
+            return f"tcl.eval('{escaped_line}')"
+        
+        return line
+    
+    def _convert_command(self, line: str) -> str:
+        """Convert a TCL command to Python function call"""
+        parts = self._tokenize_command(line)
+        if not parts:
+            return f"# FIXME: Empty command"
+        
+        cmd_name = parts[0]
+        positional_args = []
+        named_args = {}
+        
+        i = 1
+        while i < len(parts):
+            part = parts[i]
+            
+            if part.startswith('-'):
+                flag_name = part[1:]
+                
+                if i + 1 >= len(parts) or parts[i + 1].startswith('-'):
+                    named_args[flag_name] = True
+                    i += 1
+                else:
+                    flag_value = parts[i + 1]
+                    
+                    if flag_name in self.RESERVED_KEYWORDS:
+                        flag_name = f'_option_{flag_name}'
+                    
+                    named_args[flag_name] = self._convert_value(flag_value)
+                    i += 2
+            else:
+                positional_args.append(self._convert_value(part))
+                i += 1
+        
+        # Special handling for commands with positional output files
+        if cmd_name in self.POSITIONAL_OUTPUT_CMDS:
+            if 'output' in named_args:
+                output_val = named_args.pop('output')
+                positional_args.insert(0, output_val)
+        
+        # Build Python function call
+        py_args = []
+        py_args.extend(positional_args)
+        
+        for key, val in named_args.items():
+            if isinstance(val, bool) and val:
+                py_args.append(f"{key}=True")
+            elif isinstance(val, bool) and not val:
+                py_args.append(f"{key}=False")
+            else:
+                py_args.append(f"{key}={val}")
+        
+        args_str = ', '.join(py_args)
+        return f"{cmd_name}({args_str})"
+    
+    def _tokenize_command(self, line: str) -> List[str]:
+        """Tokenize a TCL command into parts, respecting braces and quotes"""
+        tokens = []
+        current_token = ''
+        in_braces = 0
+        in_quotes = False
+        escape_next = False
+        
+        for char in line:
+            if escape_next:
+                current_token += char
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                continue
+            
+            if char == '"' and in_braces == 0:
+                in_quotes = not in_quotes
+                current_token += char
+                continue
+            
+            if char == '{' and not in_quotes:
+                in_braces += 1
+                current_token += char
+                continue
+            
+            if char == '}' and not in_quotes:
+                in_braces -= 1
+                current_token += char
+                if in_braces == 0 and current_token:
+                    tokens.append(current_token)
+                    current_token = ''
+                continue
+            
+            if char in ' \t' and in_braces == 0 and not in_quotes:
+                if current_token:
+                    tokens.append(current_token)
+                    current_token = ''
+                continue
+            
+            current_token += char
+        
+        if current_token:
+            tokens.append(current_token)
+        
+        return tokens
+    
+    def _convert_value(self, value: str) -> str:
+        """Convert a TCL value to Python representation"""
+        value = value.strip()
+        
+        # Handle braced lists
+        if value.startswith('{') and value.endswith('}'):
+            inner = value[1:-1].strip()
+            items = self._tokenize_list(inner)
+            
+            if len(items) == 1:
+                return self._convert_value(items[0])
+            
+            converted_items = [self._convert_value(item) for item in items]
+            return f"[{', '.join(converted_items)}]"
+        
+        # Handle quoted strings
+        if value.startswith('"') and value.endswith('"'):
+            inner = value[1:-1]
+            inner = inner.replace("'", "\\'")
+            return f"'{inner}'"
+        
+        # Handle numbers
+        if value.replace('.', '').replace('-', '').replace('+', '').isdigit():
+            return value
+        
+        # Handle booleans
+        if value.lower() == 'true':
+            return 'True'
+        if value.lower() == 'false':
+            return 'False'
+        
+        # Handle TCL variables
+        if value.startswith('$'):
+            return f"'{value}'"
+        
+        # Default: treat as string
+        return f"'{value}'"
+    
+    def _tokenize_list(self, content: str) -> List[str]:
+        """Tokenize a TCL list, preserving complete items even with spaces"""
+        tokens = []
+        current_token = ''
+        in_braces = 0
+        in_quotes = False
+        escape_next = False
+        
+        for char in content:
+            if escape_next:
+                current_token += char
+                escape_next = False
+                continue
+            
+            if char == '\\':
+                escape_next = True
+                current_token += char
+                continue
+            
+            if char == '"' and in_braces == 0:
+                in_quotes = not in_quotes
+                current_token += char
+                continue
+            
+            if char == '{' and not in_quotes:
+                in_braces += 1
+                current_token += char
+                continue
+            
+            if char == '}' and not in_quotes:
+                in_braces -= 1
+                current_token += char
+                continue
+            
+            if char in ' \t\n' and in_braces == 0 and not in_quotes:
+                if current_token:
+                    tokens.append(current_token)
+                    current_token = ''
+                continue
+            
+            current_token += char
+        
+        if current_token:
+            tokens.append(current_token)
+        
+        return tokens
+    
+    def _convert_variable_assignment(self, line: str) -> str:
+        """Convert TCL variable assignment to Python"""
+        match = re.match(r'set\s+(\w+)\s+(.+)', line)
+        if match:
+            var_name = match.group(1)
+            value = match.group(2).strip()
+            
+            if '[' in value:
+                escaped_line = line.replace('\\', '\\\\').replace("'", "\\'")
+                return f"{var_name} = tcl.eval('{escaped_line}')"
+            
+            py_value = self._convert_value(value)
+            return f"{var_name} = {py_value}"
+        
+        return f"# FIXME: Could not convert variable: {line}"
 
 class Innovus(HammerPlaceAndRouteTool, CadenceTool):
 
@@ -721,16 +1229,30 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         """
         if self.hierarchical_mode.is_nonleaf_hierarchical():
             self.verbose_append("flatten_ilm")
-
         # Allow express design effort to complete running.
         # By default, route_design will abort in express mode with
         # "WARNING (NRIG-142) Express flow by default will not run routing".
         self.verbose_append("set_db design_express_route true")
-
         self.append(self.opt_settings())
-
+        
+        # For Innovus 25.1+ without QRC tech files, use separate route + opt flow
+        # route_opt_design requires QRC tech files for its internal postRoute extraction in 25.1
+        if self.version() >= self.version_number("251"):
+            qrc_tech = self.get_qrc_tech() if hasattr(self, 'get_qrc_tech') else ''
+            if qrc_tech == '':
+                # No QRC files - use preRoute extraction and traditional separate routing/optimization
+                # This avoids the strict QRC requirements of route_opt_design's postRoute extraction
+                self.verbose_append("set_db extract_rc_engine pre_route")
+                self.verbose_append("route_design")
+                # After routing, switch to postRoute extraction for optimization
+                self.verbose_append("set_db extract_rc_engine post_route")
+                self.verbose_append("opt_design -post_route -timing_debug_report")
+                if self.hierarchical_mode.is_nonleaf_hierarchical():
+                    self.verbose_append("unflatten_ilm")
+                return True
+        
+        # Standard route_opt_design flow (works for all versions with QRC, and <25.1 without QRC)
         self.verbose_append("route_opt_design -timing_debug_report")
-
         if self.hierarchical_mode.is_nonleaf_hierarchical():
             self.verbose_append("unflatten_ilm")
         return True
@@ -1034,14 +1556,27 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
     def run_innovus(self) -> bool:
         # Quit Innovus.
         self.verbose_append("exit")
-
         # Create par script.
         par_tcl_filename = os.path.join(self.run_dir, "par.tcl")
         self.write_contents_to_path("\n".join(self.output), par_tcl_filename)
-
+        
+        # Convert TCL to Python if using Innovus 25.1+
+        use_python = self.version() >= self.version_number("251")
+        
+        if use_python:
+            # Auto-convert TCL to Python
+            converter = InnovusTclToPythonConverter()
+            tcl_content = "\n".join(self.output)
+            python_content = converter.convert_tcl_to_python(tcl_content)
+            
+            par_py_filename = os.path.join(self.run_dir, "par.py")
+            self.write_contents_to_path(python_content, par_py_filename)
+            
+            self.logger.info(f"Auto-converted par.tcl to par.py for Innovus {self.version()}")
+        
         # Make sure that generated-scripts exists.
         os.makedirs(self.generated_scripts_dir, exist_ok=True)
-
+        
         # Create open_chip script pointing to latest (symlinked to post_<last ran step>).
         self.output.clear()
         assert super().do_pre_steps(self.first_step)
@@ -1050,9 +1585,9 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
             # Because implementation is done, enable report_timing -early/late and SDF writing
             # without recalculating timing graph for each analysis view
             self.append("set_db timing_enable_simultaneous_setup_hold_mode true")
-
+        
         self.write_contents_to_path("\n".join(self.output), self.open_chip_tcl)
-
+        
         with open(self.open_chip_script, "w") as f:
             f.write("""#!/bin/bash
         cd {run_dir}
@@ -1060,15 +1595,26 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         $INNOVUS_BIN -common_ui -win -files {open_chip_tcl}
                 """.format(run_dir=self.run_dir, open_chip_tcl=self.open_chip_tcl))
         os.chmod(self.open_chip_script, 0o755)
-
-        # Build args.
-        args = [
-            self.get_setting("par.innovus.innovus_bin"),
-            "-nowin",  # Prevent the GUI popping up.
-            "-common_ui",
-            "-files", par_tcl_filename
-        ]
-
+        
+        # Build args based on version
+        if use_python:
+            par_py_filename = os.path.join(self.run_dir, "par.py")
+            args = [
+                self.get_setting("par.innovus.innovus_bin"),
+                "-nowin",  # Prevent the GUI popping up.
+                "-common_ui",
+                "-python", # Use Python mode
+                "-files", par_py_filename
+            ]
+        else:
+            # Use TCL for older versions
+            args = [
+                self.get_setting("par.innovus.innovus_bin"),
+                "-nowin",
+                "-common_ui",
+                "-files", par_tcl_filename
+            ]
+        
         # Temporarily disable colours/tag to make run output more readable.
         # TODO: think of a more elegant way to do this?
         HammerVLSILogging.enable_colour = False
@@ -1076,9 +1622,9 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         self.run_executable(args, cwd=self.run_dir)  # TODO: check for errors and deal with them
         HammerVLSILogging.enable_colour = True
         HammerVLSILogging.enable_tag = True
-
+        
         # TODO: check that par run was successful
-
+        
         return True
 
     def create_floorplan_tcl(self) -> List[str]:
