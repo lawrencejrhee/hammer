@@ -1,34 +1,32 @@
-# Text editors / IDEs
+# Virtual environment
+.venv/
+venv/
+
+# Airflow config (contains credentials)
+airflow.cfg
+logs/
+airflow.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+
+# Log files
+*.log
+
+# Wheels directory (not needed for from-source builds)
+wheels/
+
+# IDE
+.vscode/
+.idea/
 *.swp
 *.swo
-.idea
 
-# Hammer outputs
-*.log
-*rundir/
-/*.json
-src/test/output*.json
-
-# Sphinx/doc junk
-doc/build/
-
-# Python junk
-__pycache__
-*.pyc
-.mypy_cache
-src/test/.coverage
-src/test/htmlcov
-dist/
-.tox/
-
-# Misc / unknown?
-/DVEfiles
-/opendatabase.log
-
-# e2e outputs
-e2e/poetry.lock
-e2e/obj_dir
-e2e/build*
-e2e/output.json
-e2e/*.log
-e2e/experiments/tests/
+# OS
+.DS_Store
+Thumbs.db
