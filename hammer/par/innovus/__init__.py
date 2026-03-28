@@ -1983,18 +1983,30 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         os.makedirs(self.generated_scripts_dir, exist_ok=True)
 
         # Create open_chip script pointing to latest (symlinked to post_<last ran step>).
-        self.output.clear()
-        assert super().do_pre_steps(self.first_step)
-        self.append("read_db latest")
+        # open_chip.tcl is always plain TCL — never route through self.output/self.append
+        # as it will get Python-converted when use_python=True.
+        open_chip_tcl_lines = [
+            "set_db design_process_node {}".format(self.get_setting("vlsi.core.node")),
+            "set_multi_cpu_usage -local_cpu {}".format(self.get_setting("vlsi.core.max_threads")),
+            "read_db latest",
+        ]
         if self.ran_write_design:
             # Because implementation is done, enable report_timing -early/late and SDF writing
             # without recalculating timing graph for each analysis view
-            self.append("set_db timing_enable_simultaneous_setup_hold_mode true")
-
-        self.write_contents_to_path("\n".join(self.output), self.open_chip_tcl)
+            open_chip_tcl_lines.append("set_db timing_enable_simultaneous_setup_hold_mode true")
+        self.write_contents_to_path("\n".join(open_chip_tcl_lines), self.open_chip_tcl)
 
         with open(self.open_chip_script, "w") as f:
-            f.write("""#!/bin/bash
+            if self.use_python:  # 25.1+
+                f.write("""#!/bin/bash
+        cd {run_dir}
+        source enter
+        export LD_LIBRARY_PATH=/tools/cadence/DDI/DDI251/INNOVUS251/tools.lnx86/cdsgcc/gcc/12.3/install/lib64:$LD_LIBRARY_PATH
+        export QT_XCB_GL_INTEGRATION=none
+        $INNOVUS_BIN -common_ui -win -files {open_chip_tcl}
+                """.format(run_dir=self.run_dir, open_chip_tcl=self.open_chip_tcl))
+            else:
+                f.write("""#!/bin/bash
         cd {run_dir}
         source enter
         $INNOVUS_BIN -common_ui -win -files {open_chip_tcl}
