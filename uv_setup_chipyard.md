@@ -66,7 +66,7 @@ We're going to:
 1. **Clone Chipyard** into the hammer directory
 2. **Modify 3 Hammer source files** so they work inside Airflow workers
 3. **Create/update e2e config files** with absolute paths and synthesis/PAR configs
-4. **Copy Sky130 PDK files** needed for the GCD demo
+4. **Install libnsl.so.1 locally** (RHEL 9 requirement for Cadence tools)
 5. **Update airflow.cfg** to point `dags_folder` at `hammer/shell/` and add security keys
 6. **Verify** the DAGs show up and can be triggered
 
@@ -240,10 +240,10 @@ cp /bwrcq/home/lawrencejrhee/hammer_uv/hammer/shell/hammer_vlsi.py \
 Then update the absolute paths in the `AIRFlow` and `AIRFlow_rocket` classes:
 
 ```python
-# In AIRFlow.__init__() (line ~59):
+# In AIRFlow.__init__() (line ~66):
 self.vlsi_dir = '/bwrcq/home/<username>/hammer_uv/e2e'   # ← your path
 
-# In AIRFlow_rocket.__init__() (line ~500):
+# In AIRFlow_rocket.__init__() (line ~507):
 self.vlsi_dir = '/bwrcq/home/<username>/hammer_uv/e2e'   # ← your path
 self.specs_abs = '/bwrcq/home/<username>/hammer_uv/specs' # ← your path
 ```
@@ -257,11 +257,11 @@ self.specs_abs = '/bwrcq/home/<username>/hammer_uv/specs' # ← your path
 - **`sim_rtl` and `syn/par` are mutually exclusive**: The `sim_or_syn_decide` branch checks `sim_rtl` first. If `sim_rtl=True` (default), it takes the simulation path and skips synthesis/PAR entirely. To run syn/par, trigger with `{"sim_rtl": false}`.
 - **All param defaults are `True`** (except `clean` which defaults to `False`), so triggering without config runs all enabled steps.
 
-### 3.3 genus/__init__.py — Comment Out QRC Tech File (RHEL 9 Workaround)
+### 3.3 genus/__init__.py — Comment Out QRC Tech File
 
 **File**: `hammer/synthesis/genus/__init__.py` (around line 231)
 
-**Problem**: Cadence Genus fails with `error while loading shared libraries: libnsl.so.1` on RHEL 9. The `libnsl` library was removed from RHEL 9.
+**Problem**: The QRC tech file setting can cause Genus to fail if QRC files are not available for the PDK. For Sky130 (which has no QRC), this is harmless but unnecessary. Commenting it out prevents potential failures.
 
 **Change** (comment out 3 lines):
 
@@ -270,14 +270,14 @@ self.specs_abs = '/bwrcq/home/<username>/hammer_uv/specs' # ← your path
 -            verbose_append("set_db qrc_tech_file {{ {files} }}".format(
 -                files=qrc_files[0]
 -            ))
-+        # Commented out QRC tech file setting - RHEL 9 workaround (missing libnsl.so.1)
++        # Commented out QRC tech file setting — Sky130 does not have QRC files
 +        # if len(qrc_files) > 0:
 +        #     verbose_append("set_db qrc_tech_file {{ {files} }}".format(
 +        #         files=qrc_files[0]
 +        #     ))
 ```
 
-> **Note**: This is a temporary workaround. If QRC extraction is needed for a specific PDK, install `libnsl` on the system (`sudo dnf install libnsl`, requires root) or contact sysadmins.
+> **Note**: This is a belt-and-suspenders measure. The `syn.yml` config also sets `use_qrc: false` and `qrc_files: []`. If you're using a PDK that supports QRC (e.g., Intel, TSMC), you may need to re-enable these lines.
 
 ---
 
