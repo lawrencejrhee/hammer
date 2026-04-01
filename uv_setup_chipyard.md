@@ -28,7 +28,7 @@
   - [4.2 sim-rtl.yml](#42-sim-rtlyml)
   - [4.3 Create syn.yml](#43-create-synyml)
   - [4.4 Create par.yml](#44-create-paryml)
-- [Step 5: Copy Sky130 PDK Files](#step-5-copy-sky130-pdk-files)
+- [Step 5: Install libnsl.so.1 Locally (RHEL 9 — Required for Cadence Tools)](#step-5-install-libnsl-locally-rhel-9--required-for-cadence-tools)
 - [Step 6: Update Airflow Configuration for DAGs](#step-6-update-airflow-configuration-for-dags)
   - [6.1 Point dags_folder to hammer/shell](#61-point-dags_folder-to-hammershell)
   - [6.2 Add Security Keys (CRITICAL)](#62-add-security-keys-critical)
@@ -208,12 +208,26 @@ The replacement file defines:
 
 | Component | Purpose |
 |-----------|---------|
+| `LD_LIBRARY_PATH` setup | Module-level code that adds `~/libnsl_local/usr/lib64` to `LD_LIBRARY_PATH` so Cadence tools can find `libnsl.so.1`. Required because Airflow worker subprocesses don't inherit the parent shell's environment. |
 | `run_cli_driver()` | Safety wrapper — catches `SystemExit` from `CLIDriver().main()` so it doesn't kill the Airflow worker. Only re-raises for non-zero exit codes. |
 | `get_param()` | Helper to read DAG params from `conf` (runtime override) or `params` (DAG defaults). Fixes the issue where triggering without explicit config causes all tasks to skip. |
 | `AIRFlow` class | GCD demo config — absolute paths to `e2e/` configs, methods for `build()`, `sim_rtl()`, `syn()`, `par()`, `clean()`. |
 | `AIRFlow_rocket` class | RocketTile demo config — same pattern, adds `sram_generator()` and `syn_to_par()` steps. |
 | `Sledgehammer_demo_gcd` DAG | Branching task flow for GCD design. |
 | `Sledgehammer_demo_rocket` DAG | Branching task flow for RocketTile design. |
+
+The `LD_LIBRARY_PATH` block at the top of the file (right after `import json`) looks like:
+
+```python
+# RHEL 9 workaround: Cadence tools (Genus, Innovus) need libnsl.so.1
+_libnsl_path = os.path.expanduser("~/libnsl_local/usr/lib64")
+if os.path.isfile(os.path.join(_libnsl_path, "libnsl.so.1")):
+    _ld = os.environ.get("LD_LIBRARY_PATH", "")
+    if _libnsl_path not in _ld:
+        os.environ["LD_LIBRARY_PATH"] = f"{_libnsl_path}:{_ld}" if _ld else _libnsl_path
+```
+
+> **CRITICAL**: This must be in the DAG file itself, not just in `venv.sh`. Airflow spawns worker processes that do not inherit `LD_LIBRARY_PATH` from the parent shell. Without this, Genus and Innovus will fail with `libnsl.so.1: cannot open shared object file` even if `venv.sh` exports the variable.
 
 **How to apply**: Copy the modified `hammer_vlsi.py` from the reference setup and update the absolute paths:
 
@@ -359,22 +373,36 @@ technology.sky130:
 
 ---
 
-## Step 5: Copy Sky130 PDK Files
+## Step 5: Install libnsl Locally (RHEL 9 — Required for Cadence Tools)
 
-The Sky130 technology plugin files in stock Hammer are incomplete. Copy the full versions from a reference setup:
+RHEL 9 removed `libnsl.so.1`, which Cadence tools (Genus, Innovus) depend on. Without it, synthesis and PAR tasks fail with:
+
+```
+genus: error while loading shared libraries: libnsl.so.1: cannot open shared object file
+```
+
+Install the library locally (no root required):
 
 ```bash
-SRC=/bwrcq/C/bandk1451/chipyard-sledgehammer-br-airflow3/chipyard/vlsi/hammer/hammer/technology/sky130
-DST=/bwrcq/home/<username>/hammer_uv/hammer/technology/sky130
+# Download the libnsl RPM
+mkdir -p /tmp/libnsl_build
+cd /tmp/libnsl_build
+dnf download libnsl
 
-cp $SRC/__init__.py $DST/__init__.py
-cp $SRC/sram-cache.json $DST/sram-cache.json
-mkdir -p $DST/sram_compiler
-cp $SRC/sram_compiler/__init__.py $DST/sram_compiler/__init__.py
+# Extract to a local directory
+mkdir -p ~/libnsl_local
+rpm2cpio libnsl-*x86_64.rpm | (cd ~/libnsl_local && cpio -idmv)
 
 # Verify
-ls $DST/__init__.py $DST/sram-cache.json $DST/sram_compiler/__init__.py
+ls ~/libnsl_local/usr/lib64/libnsl.so.1
+# Should show the file
+
+# Clean up
+cd ~
+rm -rf /tmp/libnsl_build
 ```
+
+> **Note**: The stock Sky130 PDK files that ship with Hammer work as-is for the GCD demo. Do **NOT** copy Sky130 files from other reference setups — they may be from a different Hammer version with incompatible APIs (e.g., importing `TechConfig` which doesn't exist in stock Hammer).
 
 ---
 
@@ -709,7 +737,11 @@ The `run_cli_driver()` wrapper is calling itself instead of `CLIDriver().main()`
 
 ### genus: error while loading shared libraries: libnsl.so.1
 
-Comment out QRC tech file lines in `hammer/synthesis/genus/__init__.py` (see [Step 3.3](#33-genusinitpy--comment-out-qrc-tech-file-rhel-9-workaround)).
+**Cause**: RHEL 9 removed `libnsl.so.1`. Cadence Genus and Innovus depend on it.
+
+**Fix**: Install `libnsl.so.1` locally (see [Step 5](#step-5-install-libnsl-locally-rhel-9--required-for-cadence-tools)) AND ensure the `LD_LIBRARY_PATH` is set in `hammer_vlsi.py` (see [Step 3.2](#32-hammer_vlsipy--replace-with-sledgehammer-dag-definitions)).
+
+Setting `LD_LIBRARY_PATH` only in `venv.sh` or the parent shell is **not enough** — Airflow worker subprocesses don't inherit it. The path must be set in the DAG file itself.
 
 ### airflow db init doesn't work
 
@@ -732,13 +764,10 @@ kill -9 <PID>
 | # | File | Change | Why |
 |---|------|--------|-----|
 | 1 | `hammer/vlsi/cli_driver.py` | `sys.exit(1)` → `return 1`; `sys.exit(self.run_main_parsed(...))` → `return self.run_main_parsed(...)` | Prevent `sys.exit()` from killing Airflow workers |
-| 2 | `hammer/shell/hammer_vlsi.py` | Replaced 9-line script with ~1085-line Sledgehammer DAG definitions | Airflow DAG file with `run_cli_driver()` wrapper, `get_param()` helper, `AIRFlow`/`AIRFlow_rocket` classes, two DAG definitions |
-| 3 | `hammer/synthesis/genus/__init__.py` | Commented out 3 lines (~231-233): QRC tech file setting | Workaround for missing `libnsl.so.1` on RHEL 9 |
-| 4 | `hammer/technology/sky130/__init__.py` | Copied from reference setup | Full Sky130 PDK plugin |
-| 5 | `hammer/technology/sky130/sram-cache.json` | Copied from reference setup | Sky130 SRAM definitions |
-| 6 | `hammer/technology/sky130/sram_compiler/__init__.py` | Copied from reference setup | Sky130 SRAM compiler |
-| 7 | `e2e/configs-design/gcd/common.yml` | `"src/gcd.v"` → absolute path | Airflow workers don't run from `e2e/` |
-| 8 | `e2e/configs-design/gcd/sim-rtl.yml` | `"src/gcd.v"`, `"src/gcd_tb.v"` → absolute paths | Airflow workers don't run from `e2e/` |
+| 2 | `hammer/shell/hammer_vlsi.py` | Replaced 9-line script with ~1090-line Sledgehammer DAG definitions including `LD_LIBRARY_PATH` setup for libnsl | Airflow DAG file with libnsl workaround, `run_cli_driver()` wrapper, `get_param()` helper, `AIRFlow`/`AIRFlow_rocket` classes, two DAG definitions |
+| 3 | `hammer/synthesis/genus/__init__.py` | Commented out 3 lines (~231-233): QRC tech file setting | Workaround for QRC loading issue on RHEL 9 |
+| 4 | `e2e/configs-design/gcd/common.yml` | `"src/gcd.v"` → absolute path | Airflow workers don't run from `e2e/` |
+| 5 | `e2e/configs-design/gcd/sim-rtl.yml` | `"src/gcd.v"`, `"src/gcd_tb.v"` → absolute paths | Airflow workers don't run from `e2e/` |
 
 ### Files Created (not in stock Hammer)
 
@@ -749,16 +778,25 @@ kill -9 <PID>
 | 3 | `pyproject.toml` | Converted from Poetry to PEP 621 for uv (done in UV_SETUP.md) |
 | 4 | `airflow.cfg` | dags_folder, security keys, PostgreSQL connection (done in UV_SETUP.md + Step 6) |
 | 5 | `.gitignore` | Added chipyard/, airflow.cfg, logs/, wheels/, .venv/ |
-| 6 | `venv.sh` | Convenience activation script (done in UV_SETUP.md) |
+| 6 | `venv.sh` | Convenience activation script with libnsl `LD_LIBRARY_PATH` (done in UV_SETUP.md + Step 5) |
 
 ### Files NOT Modified (left as-is from stock Hammer)
 
 | File | Note |
 |------|------|
+| `hammer/technology/sky130/__init__.py` | Stock Sky130 PDK plugin — do NOT replace with copies from other setups |
+| `hammer/technology/sky130/sram-cache.json` | Stock SRAM cache — do NOT replace |
+| `hammer/technology/sky130/sram_compiler/__init__.py` | Stock SRAM compiler — do NOT replace |
 | `e2e/configs-design/gcd/sky130.yml` | PDK-specific design config |
 | `e2e/configs-env/bwrc-env.yml` | BWRC environment config |
 | `e2e/configs-pdk/sky130.yml` | Sky130 PDK config |
 | `e2e/configs-tool/cm.yml` | Commercial tools config |
+
+### External Dependencies Installed (not in the repo)
+
+| Item | Location | Purpose |
+|------|----------|---------|
+| `libnsl.so.1` | `~/libnsl_local/usr/lib64/` | RHEL 9 workaround — Cadence tools need this library. Extracted from RPM without root access. |
 
 ---
 
@@ -785,7 +823,7 @@ hammer_uv/                                # AIRFLOW_HOME
 │   │   └── genus/
 │   │       └── __init__.py            # ★ Genus plugin (modified: QRC workaround)
 │   └── technology/
-│       └── sky130/                    # ★ Sky130 PDK files (copied from reference)
+│       └── sky130/                    # Stock Sky130 PDK (do NOT replace)
 │           ├── __init__.py
 │           ├── sram-cache.json
 │           └── sram_compiler/
@@ -810,6 +848,8 @@ hammer_uv/                                # AIRFLOW_HOME
 ```
 
 Files marked with ★ were modified or created from the stock Hammer repository.
+
+> **IMPORTANT**: Do NOT copy Sky130 PDK files (`__init__.py`, `sram-cache.json`, `sram_compiler/__init__.py`) from other reference setups. They may import APIs (like `TechConfig`) that don't exist in stock Hammer, causing `ImportError` at runtime.
 
 ---
 
