@@ -75,7 +75,11 @@ This document provides a **complete from-scratch guide** for setting up **Chipya
    - **Email**: anne_young@berkeley.edu
    - **System Admins**: bwrc-sysadmins@lists.eecs.berkeley.edu
 
-4. **Database**: A PostgreSQL database must exist (e.g., `airflow_<username>`)
+4. **Database**: A PostgreSQL database must exist (e.g., `airflow_<username>`). You can verify this using:
+
+```bash
+psql -h barney.eecs.berkeley.edu -p 5433 -U <username> -l
+```
 
 5. **Python 3.10-3.13**: Required for Airflow 3.1.0
 
@@ -412,7 +416,7 @@ Edit `airflow.cfg` and update the `[database]` section:
 
 ```ini
 [database]
-sql_alchemy_conn = postgresql+psycopg2://<username>:YOUR_PASSWORD@barney.eecs.berkeley.edu:5433/airflow_<username>
+sql_alchemy_conn = postgresql+psycopg2://<username>:YOUR_PASSWORD@barney.eecs.berkeley.edu:5433/<database>
 sql_alchemy_pool_size = 10
 sql_alchemy_max_overflow = 20
 sql_alchemy_engine_args = {"pool_pre_ping": true}
