@@ -568,6 +568,9 @@ cd /bwrcq/C/<username>/hammer/chipyard
 # Source BWRC environment for EDA tool paths
 source /tools/C/ee290-sp25/bwrc-env.sh
 
+# Initialize conda (required for build-setup.sh)
+eval "$(/tools/C/ee290-sp25/miniforge3/bin/conda shell.bash hook)"
+
 # Run build setup (skip FireSim steps 6-9)
 ./build-setup.sh riscv-tools -s 6 -s 7 -s 8 -s 9
 ```
