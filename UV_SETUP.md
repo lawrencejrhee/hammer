@@ -623,7 +623,7 @@ curl -o hammer/shell/hammer_vlsi.py \
   https://raw.githubusercontent.com/lawrencejrhee/hammer/uv-setup/hammer/shell/hammer_vlsi.py
 ```
 
-**Important**: Update the absolute paths in the `AIRFlow` and `AIRFlow_rocket` classes to match your installation:
+**Important**: Open the downloaded hammer/shell/hammer_vlsi.py and update the absolute paths:
 
 ```python
 # In AIRFlow.__init__():
