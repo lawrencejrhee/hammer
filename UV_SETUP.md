@@ -612,13 +612,13 @@ Several Hammer source files must be modified to function properly within Airflow
       return self.run_main_parsed(vars(parser.parse_args(args)))
 ```
 
-#### 10.2 Replace `hammer_vlsi.py` with DAG definitions
+#### 10.2 Get Sledgehammer DAG definitions
 
-**File**: `hammer/shell/hammer_vlsi.py`
-
-The stock `hammer_vlsi.py` is a 9-line script that just calls `CLIDriver().main()`. Replace it with the Sledgehammer DAG definitions:
+The stock `hammer/shell/hammer_vlsi.py` is a 9-line script that just calls `CLIDriver().main()`. 
+Download the Sledgehammer DAG file to replace it:
 
 ```bash
+cd /bwrcq/C/<username>/hammer
 curl -o hammer/shell/hammer_vlsi.py \
   https://raw.githubusercontent.com/lawrencejrhee/hammer/uv-setup/hammer/shell/hammer_vlsi.py
 ```
