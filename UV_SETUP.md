@@ -563,16 +563,27 @@ echo "chipyard/" >> .gitignore
 If you need to build chipyard-based designs:
 
 ```bash
-cd /bwrcq/C/<username>/hammer/chipyard
+## One-time setup (run once per account)
+
+# Install Miniforge (Chipyard's recommended conda distribution)
+curl -L -O "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+bash Miniforge3-$(uname)-$(uname -m).sh -b -p ~/miniforge3
+rm Miniforge3-$(uname)-$(uname -m).sh
+~/miniforge3/bin/conda init bash
+source ~/.bashrc
+
+## Build Chipyard
+
+cd /users/<username>/hammer/chipyard
 
 # Source BWRC environment for EDA tool paths
 source /tools/C/ee290-sp25/bwrc-env.sh
 
-# Initialize conda (required for build-setup.sh)
-eval "$(/tools/C/ee290-sp25/miniforge3/bin/conda shell.bash hook)"
-
 # Run build setup (skip FireSim steps 6-9)
 ./build-setup.sh riscv-tools -s 6 -s 7 -s 8 -s 9
+
+# After build completes, activate the Chipyard environment
+source env.sh
 ```
 
 For just the GCD demo and Sledgehammer DAGs, **skip this step** — the chipyard clone is sufficient.
