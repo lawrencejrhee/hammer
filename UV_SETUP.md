@@ -586,11 +586,11 @@ source /tools/C/ee290-sp25/bwrc-env.sh
 source env.sh
 ```
 
-For just the GCD demo and Sledgehammer DAGs, **skip this step** — the chipyard clone is sufficient.
+If you have a chipyard setup already, you can skip this step.
 
 ### Step 10: Modify Hammer Files for Airflow Compatibility
 
-Several Hammer source files need modification to work correctly within Airflow. These changes are **required** — without them, tasks will crash the Airflow worker process or fail to execute.
+Several Hammer source files must be modified to function properly within Airflow. These changes are **required**. Without them, tasks may crash the Airflow worker process or fail to execute.
 
 #### 10.1 Remove `sys.exit()` from `cli_driver.py`
 
@@ -619,7 +619,7 @@ Several Hammer source files need modification to work correctly within Airflow. 
 The stock `hammer_vlsi.py` is a 9-line script that just calls `CLIDriver().main()`. Replace it entirely with the Sledgehammer DAG definitions that define the `Sledgehammer_demo_gcd` and `Sledgehammer_demo_rocket` DAGs.
 
 The modified file includes:
-- **`LD_LIBRARY_PATH` setup**: Module-level code that adds `~/libnsl_local/usr/lib64` to `LD_LIBRARY_PATH` so Cadence tools can find `libnsl.so.1`. This **must** be in the DAG file — Airflow worker subprocesses don't inherit the parent shell's environment.
+- **`LD_LIBRARY_PATH` setup**: Module-level code that adds `~/libnsl_local/usr/lib64` to `LD_LIBRARY_PATH` so Cadence tools can find `libnsl.so.1`. This **must** be in the DAG file. Airflow worker subprocesses don't inherit the parent shell's environment.
 - **`run_cli_driver()` wrapper**: Catches `SystemExit` from `CLIDriver().main()` to prevent killing the Airflow worker
 - **`get_param()` helper**: Reads DAG parameters from `conf` (runtime) or `params` (defaults), fixing the issue where triggering without config skips all tasks
 - **`AIRFlow` class**: GCD demo configuration with absolute paths to `e2e/` configs
@@ -1189,7 +1189,7 @@ airflow dags trigger Sledgehammer_demo_gcd --conf '{"sim_rtl": false}'
 
 **Fix**: Install `libnsl.so.1` locally (see [Step 11](#step-11-install-libnsl-locally-rhel-9--required-for-cadence-tools)) AND ensure `LD_LIBRARY_PATH` is set in `hammer_vlsi.py` (see [Step 10.2](#102-replace-hammer_vlsipy-with-dag-definitions)).
 
-Setting `LD_LIBRARY_PATH` only in `venv.sh` is **not enough** — Airflow worker subprocesses don't inherit it. The path must also be set in the DAG file itself.
+Setting `LD_LIBRARY_PATH` only in `venv.sh` is **not enough** as Airflow worker subprocesses don't inherit it. The path must also be set in the DAG file itself.
 
 ### DAGs not appearing
 
@@ -1201,7 +1201,7 @@ Setting `LD_LIBRARY_PATH` only in `venv.sh` is **not enough** — Airflow worker
 
 ### `airflow db init` doesn't work
 
-Airflow 3.x removed `db init`. Use `airflow db migrate` instead — it's idempotent and safe to run any number of times.
+Airflow 3.x removed `db init`. Use `airflow db migrate` instead.
 
 ### Want to Reset Everything
 
@@ -1306,8 +1306,8 @@ Files marked with ★ were modified from the stock Hammer repository.
 4. **Set AIRFLOW_HOME**: Every terminal that runs `airflow` commands must have `AIRFLOW_HOME` set
 5. **No `sys.exit()` in tasks**: Never use `sys.exit()` in Airflow task code
 6. **Use absolute paths in YAML configs**: Airflow workers don't run from the e2e directory
-7. **Understand `sim_rtl` vs `syn/par` exclusivity**: The DAG branches — you can run sim OR syn/par, not both
-8. **Use `airflow db migrate` freely**: It's idempotent — safe to run anytime
+7. **Understand `sim_rtl` vs `syn/par` exclusivity**: The DAG branches: you can run sim OR syn/par, not both
+8. **Use `airflow db migrate` freely**: Safe to run anytime
 9. **Verify editable installs after moving repos**: Re-run `uv pip install -e .` if you move the directory
 
 ---
