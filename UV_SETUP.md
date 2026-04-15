@@ -942,6 +942,15 @@ if [ -f /tools/C/ee290-sp25/bwrc-env.sh ]; then
     echo "BWRC EDA environment sourced."
 fi
 
+# Initialize conda and activate Chipyard environment (if built)
+if [ -f "$HOME/miniforge3/bin/conda" ]; then
+    eval "$($HOME/miniforge3/bin/conda shell.bash hook)"
+    if [ -f "$AIRFLOW_HOME/chipyard/env.sh" ]; then
+        source "$AIRFLOW_HOME/chipyard/env.sh"
+        echo "Chipyard conda environment activated."
+    fi
+fi
+
 # RHEL 9 workaround: Cadence tools need libnsl.so.1 (removed in RHEL 9)
 if [ -f "$HOME/libnsl_local/usr/lib64/libnsl.so.1" ]; then
     export LD_LIBRARY_PATH="$HOME/libnsl_local/usr/lib64:${LD_LIBRARY_PATH:-}"
