@@ -616,15 +616,12 @@ Several Hammer source files must be modified to function properly within Airflow
 
 **File**: `hammer/shell/hammer_vlsi.py`
 
-The stock `hammer_vlsi.py` is a 9-line script that just calls `CLIDriver().main()`. Replace it entirely with the Sledgehammer DAG definitions that define the `Sledgehammer_demo_gcd` and `Sledgehammer_demo_rocket` DAGs.
+The stock `hammer_vlsi.py` is a 9-line script that just calls `CLIDriver().main()`. Replace it with the Sledgehammer DAG definitions:
 
-The modified file includes:
-- **`LD_LIBRARY_PATH` setup**: Module-level code that adds `~/libnsl_local/usr/lib64` to `LD_LIBRARY_PATH` so Cadence tools can find `libnsl.so.1`. This **must** be in the DAG file. Airflow worker subprocesses don't inherit the parent shell's environment.
-- **`run_cli_driver()` wrapper**: Catches `SystemExit` from `CLIDriver().main()` to prevent killing the Airflow worker
-- **`get_param()` helper**: Reads DAG parameters from `conf` (runtime) or `params` (defaults), fixing the issue where triggering without config skips all tasks
-- **`AIRFlow` class**: GCD demo configuration with absolute paths to `e2e/` configs
-- **`AIRFlow_rocket` class**: RocketTile demo configuration
-- **Two DAG definitions**: `Sledgehammer_demo_gcd` and `Sledgehammer_demo_rocket` with branching task flows
+```bash
+curl -o hammer/shell/hammer_vlsi.py \
+  https://raw.githubusercontent.com/lawrencejrhee/hammer/uv-setup/hammer/shell/hammer_vlsi.py
+```
 
 **Important**: Update the absolute paths in the `AIRFlow` and `AIRFlow_rocket` classes to match your installation:
 
@@ -636,8 +633,6 @@ self.vlsi_dir = '/bwrcq/C/<username>/hammer/e2e'  # ← your path
 self.vlsi_dir = '/bwrcq/C/<username>/hammer/e2e'   # ← your path
 self.specs_abs = '/bwrcq/C/<username>/hammer/specs' # ← your path
 ```
-
-> **Tip**: You can copy the modified `hammer_vlsi.py` from a reference setup (e.g., `/bwrcq/home/lawrencejrhee/hammer_uv/hammer/shell/hammer_vlsi.py`) and only update the absolute paths.
 
 #### 10.3 Comment out QRC tech file in Genus
 
