@@ -900,6 +900,16 @@ class CLIDriver:
                 assert driver.syn_tool is not None, "Syn tool must exist since we ran synthesis_action successfully"
                 dump_config_to_json_file(os.path.join(driver.syn_tool.run_dir, "par-input.json"), par_input)
 
+                # Also store the par-input artifact in Postgres, keyed by SHA256
+                # of its canonical JSON. Non-fatal on failure so a DB outage can't
+                # break a real syn -> par run.
+                try:
+                    from hammer.vlsi.pd_store import store_par_input
+                    sha = store_par_input(par_input)
+                    driver.log.info(f"Stored par-input in Postgres with sha256={sha}")
+                except Exception as e:
+                    driver.log.warning(f"Failed to store par-input in Postgres (POC, non-fatal): {e}")
+
                 # Use new par input and run place-and-route.
                 driver.update_project_configs([par_input])
                 par_output = par_action(driver, append_error_func)

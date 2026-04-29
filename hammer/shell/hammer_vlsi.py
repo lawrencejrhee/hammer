@@ -63,7 +63,7 @@ class AIRFlow:
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
         
         # Directory structure - use absolute paths for Airflow compatibility
-        self.vlsi_dir = '/bwrcq/home/lawrencejrhee/hammer_uv/e2e'
+        self.vlsi_dir = '/users/lawrencejrhee/hammer/e2e'
         self.e2e_dir = os.getenv('e2e_dir', self.vlsi_dir)
         self.OBJ_DIR = os.getenv('OBJ_DIR', f"{self.e2e_dir}/build-{self.pdk}-{self.tools}/{self.design}")
         
@@ -504,8 +504,8 @@ class AIRFlow_rocket:
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
         
         # Directory structure - use absolute paths for Airflow compatibility
-        self.vlsi_dir = '/bwrcq/home/lawrencejrhee/hammer_uv/e2e'
-        self.specs_abs = '/bwrcq/home/lawrencejrhee/hammer_uv/specs'
+        self.vlsi_dir = '/users/lawrencejrhee/hammer/e2e'
+        self.specs_abs = '/users/lawrencejrhee/hammer/specs'
         self.e2e_dir = os.getenv('e2e_dir', self.vlsi_dir)
         self.specs_dir = os.getenv('specs_dir', self.specs_abs) #Point to specs directory for intel2x2 yml files
         self.OBJ_DIR = os.getenv('OBJ_DIR', f"{self.e2e_dir}/build-{self.pdk}-{self.tools}/{self.design}")
