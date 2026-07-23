@@ -322,9 +322,19 @@ def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
             return None
         step = confirmed[-1]
         path = os.path.join(rundir, "pre_" + step)
+        # same floor measurement the local resume uses (checkpoint mtime span),
+        # carried with the row so a cross-machine resume credits the skipped
+        # steps' measured time in the ledger too
+        saved = None
+        try:
+            t0 = os.path.getmtime(os.path.join(rundir, "pre_" + confirmed[0]))
+            saved = max(0.0, os.path.getmtime(path) - t0)
+        except OSError:
+            pass
         from hammer.vlsi import pd_store
         from pathlib import Path
         size = pd_store.store_checkpoint(key, stage_tag, step, Path(path),
+                                         saved_seconds=saved,
                                          module=module, **_provenance(driver))
         _log_info(driver, f"Pushed checkpoint pre_{step} ({size / 1e6:.1f} MB "
                           "compressed) to the database for cross-machine resume.")
@@ -397,7 +407,8 @@ def _db_fallback_plan(driver: Any, stage_tag: str, rundir: str) -> Optional[Dict
         pd_store.materialize_checkpoint(rec, Path(rundir))
         _log_info(driver, f"Fetched checkpoint pre_{step} "
                           f"({rec['size_bytes'] / 1e6:.1f} MB) from the database.")
-        return {"step": step, "saved_seconds": None, "key": key, "source": "database"}
+        return {"step": step, "saved_seconds": rec.get("saved_seconds"),
+                "key": key, "source": "database"}
     except Exception:
         return None
 

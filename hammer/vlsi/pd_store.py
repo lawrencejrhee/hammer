@@ -488,6 +488,7 @@ ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS project TEXT;
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS make_would_rerun BOOLEAN;
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS module TEXT;
 ALTER TABLE {FQ_CACHE_EVENT} ADD COLUMN IF NOT EXISTS store_seconds REAL;
+ALTER TABLE {FQ_CHECKPOINT} ADD COLUMN IF NOT EXISTS saved_seconds REAL;
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_stage   ON {FQ_CACHE_EVENT} (stage);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_dag     ON {FQ_CACHE_EVENT} (dag_id);
 CREATE INDEX IF NOT EXISTS idx_{CACHE_EVENT_TABLE}_design  ON {FQ_CACHE_EVENT} (design);
@@ -517,6 +518,9 @@ CREATE TABLE IF NOT EXISTS {FQ_CHECKPOINT} (
     design           TEXT,
     module           TEXT,
     project          TEXT,
+    -- measured wall time of the completed steps up to this checkpoint, so a
+    -- cross-machine resume can credit the skip in the time-saved ledger
+    saved_seconds    REAL,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (stage_key, step)
 );
@@ -1872,6 +1876,7 @@ def list_stage_blobs(
 
 
 def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
+                     saved_seconds: Optional[float] = None,
                      **provenance: Any) -> int:
     """Upsert one sub-step checkpoint (file gzipped, directory tarred).
 
@@ -1893,16 +1898,18 @@ def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
         with conn.cursor() as cur:
             cur.execute(
                 f"""INSERT INTO {FQ_CHECKPOINT}
-                    (stage_key, stage, step, data, size_bytes, is_dir,
+                    (stage_key, stage, step, data, size_bytes, is_dir, saved_seconds,
                      {", ".join(cols)})
-                    VALUES (%s, %s, %s, %s, %s, %s, {", ".join(["%s"] * len(cols))})
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, {", ".join(["%s"] * len(cols))})
                     ON CONFLICT (stage_key, step) DO UPDATE SET
                         data = EXCLUDED.data,
                         size_bytes = EXCLUDED.size_bytes,
                         is_dir = EXCLUDED.is_dir,
                         stage = EXCLUDED.stage,
+                        saved_seconds = EXCLUDED.saved_seconds,
                         created_at = NOW()""",
-                [stage_key, stage, step, psycopg2.Binary(data), len(data), is_dir] + vals)
+                [stage_key, stage, step, psycopg2.Binary(data), len(data), is_dir,
+                 saved_seconds] + vals)
         conn.commit()
     return len(data)
 
@@ -1945,7 +1952,7 @@ def fetch_checkpoint(stage_key: Optional[str] = None, step: Optional[str] = None
     if ckpt_id is not None:
         where.append("id = %s")
         params.append(ckpt_id)
-    sql = (f"SELECT id, stage_key, stage, step, data, size_bytes, is_dir "
+    sql = (f"SELECT id, stage_key, stage, step, data, size_bytes, is_dir, saved_seconds "
            f"FROM {FQ_CHECKPOINT} WHERE " + " AND ".join(where))
     sql += " ORDER BY created_at DESC LIMIT 1"
     with _connect() as conn:
