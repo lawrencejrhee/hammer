@@ -90,6 +90,15 @@ def is_cache_enabled(driver: Optional[Any] = None) -> bool:
     return False
 
 
+_STAGE_TOOL_ATTRS = {
+    "synthesis": "syn_tool",
+    "par": "par_tool",
+    "drc": "drc_tool",
+    "lvs": "lvs_tool",
+    "sim": "sim_tool",
+}
+
+
 def _build_cache_key(driver: Any, stage_tag: str) -> str:
     """Compute the stage cache key from the live driver config."""
     db_json = driver.database.get_database_json()
@@ -102,6 +111,22 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
             db["vlsi.rtl_fingerprint_sha256"] = pd_store.compute_rtl_fingerprint(rtl_files)
         except Exception:
             pass
+
+    # A tool's scripting mode (Innovus Tcl vs Python interpreter) changes the
+    # scripts, the rundir layout, and the checkpoints, but is derived at run
+    # time rather than being a config key of its own -- so bake the effective
+    # mode into the hashed slice explicitly. Artifacts produced by the two
+    # modes can then never answer for each other, even at the same tool
+    # version. (Keyed under vlsi.* so _stage_relevant_keys keeps it.)
+    try:
+        tool = getattr(driver, _STAGE_TOOL_ATTRS.get(stage_tag, ""), None)
+        mode = getattr(tool, "use_python", None)
+        if mode is not None:
+            db[f"vlsi.pd_cache.script_mode.{stage_tag}"] = (
+                "python" if mode else "tcl"
+            )
+    except Exception:
+        pass
 
     return pd_store.compute_stage_key(db, stage_tag)
 
