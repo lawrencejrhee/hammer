@@ -414,13 +414,86 @@ class HammerStandalone(StandaloneCommand):
         self.print_output("standalone", f"Tunnel from your laptop: ssh {fwd} {user}@{host}")
 
 
+def _effective_api_port() -> int:
+    """The port this launch will bind: env override, else airflow.cfg [api] port."""
+    for var in ("AIRFLOW__API__PORT", "SLEDGE_PORT"):
+        val = os.environ.get(var, "")
+        if val.isdigit():
+            return int(val)
+    cfg = os.path.join(os.environ.get("AIRFLOW_HOME", ""), "airflow.cfg")
+    try:
+        in_api = False
+        with open(cfg) as f:
+            for line in f:
+                s = line.strip()
+                if s.startswith("["):
+                    in_api = (s == "[api]")
+                elif in_api and s.startswith("port"):
+                    parts = s.split("=", 1)
+                    if len(parts) == 2 and parts[1].strip().isdigit():
+                        return int(parts[1].strip())
+    except OSError:
+        pass
+    return 8080
+
+
+def _port_is_free(port: int) -> bool:
+    import socket
+    with socket.socket() as s:
+        return s.connect_ex(("127.0.0.1", port)) != 0
+
+
+def _configure_port() -> int:
+    """Apply SLEDGE_PORT and keep base_url + the edge worker endpoint
+    consistent with it. Returns the effective port.
+
+    Unset defaults to 'auto': take the cfg port if free, else the next free
+    one -- so a bare `sledgehammer` always comes up. Pin an explicit
+    SLEDGE_PORT=<n> to demand that port (the launch then refuses if taken)."""
+    req = os.environ.get("SLEDGE_PORT", "auto").strip() or "auto"
+    port = None
+    if req == "auto":
+        base = _effective_api_port()
+        for cand in range(base, base + 20):
+            if _port_is_free(cand):
+                port = cand
+                break
+        if port is None:
+            sys.exit(f"[guard] ERROR: no free port found in {base}..{base + 19}.")
+        if port != base:
+            print(f"[port] {base} busy; auto-selected {port}.")
+    elif req.isdigit():
+        port = int(req)
+    if port is not None:
+        os.environ["AIRFLOW__API__PORT"] = str(port)
+        os.environ["AIRFLOW__API__BASE_URL"] = f"http://localhost:{port}"
+        os.environ.setdefault(
+            "AIRFLOW__EDGE__API_URL",
+            f"http://localhost:{port}/edge_worker/v1/rpcapi")
+        print(f"[port] serving on {port}.")
+        return port
+    return _effective_api_port()
+
+
+def _refuse_if_port_taken(port: int) -> None:
+    """Two api-servers cannot share one port -- that conflict is a hard error.
+    (The shared-DB scheduler overlap is only warned about; see below.)"""
+    if not _port_is_free(port):
+        sys.exit(
+            f"[guard] ERROR: port {port} is already in use on this host -- another\n"
+            f"        sledgehammer/api-server is listening there. You pinned this port\n"
+            f"        with SLEDGE_PORT={port}; stop the other instance, pick a different\n"
+            f"        port, or unset SLEDGE_PORT to let the launcher auto-select.")
+
+
 def _refuse_if_scheduler_running() -> None:
-    """Refuse to start if another scheduler is already live on this metadata DB.
+    """Warn if another scheduler is already live on this metadata DB.
 
     Two deployments on one DB (a second checkout, a half-finished takeover) means
     duelling schedulers. We check the job table for a recent SchedulerJob
     heartbeat -- cross-host, since every scheduler heartbeats to the shared DB --
-    and bail rather than pile on. SLEDGE_ALLOW_MULTI_SCHEDULER=1 to override (HA).
+    and print a loud notice. This used to refuse outright; it no longer blocks
+    (per operator request), it only informs.
     """
     conn_uri = os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "")
     if os.environ.get("SLEDGE_ALLOW_MULTI_SCHEDULER") or not conn_uri.startswith("postgresql"):
@@ -444,11 +517,13 @@ def _refuse_if_scheduler_running() -> None:
         conn.close()
     if rows:
         where = "; ".join(f"{host} (heartbeat {ts:%Y-%m-%d %H:%M:%S})" for host, ts in rows)
-        sys.exit(
-            f"[guard] ERROR: a scheduler is already running against this database:\n"
+        print(
+            f"[guard] WARNING: another scheduler is already heartbeating on this database:\n"
             f"          {where}\n"
-            f"        Refusing to start a second one on the same metadata DB. Stop that\n"
-            f"        instance first, or set SLEDGE_ALLOW_MULTI_SCHEDULER=1 to override.")
+            f"        Starting anyway. Two schedulers with different dags folders WILL\n"
+            f"        fight over the DAG table and misroute tasks; make sure the other\n"
+            f"        one is yours and shutting down, or that this is intentional HA.",
+            file=sys.stderr)
 
 
 def _refuse_if_whitelist_empty() -> None:
@@ -634,6 +709,7 @@ def _ensure_member_role() -> None:
 
 
 def main():
+    _refuse_if_port_taken(_configure_port())
     _refuse_if_scheduler_running()
     _refuse_if_whitelist_empty()
     _promote_owner_to_admin()
