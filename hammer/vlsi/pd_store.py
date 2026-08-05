@@ -118,6 +118,20 @@ CACHE_EVENT_TABLE = "pd_cache_events"
 FQ_CACHE_EVENT = f"{SCHEMA_NAME}.{CACHE_EVENT_TABLE}"
 CHECKPOINT_TABLE = "pd_checkpoints"
 FQ_CHECKPOINT = f"{SCHEMA_NAME}.{CHECKPOINT_TABLE}"
+BLOB_CHUNK_TABLE = "pd_blob_chunks"
+FQ_BLOB_CHUNK = f"{SCHEMA_NAME}.{BLOB_CHUNK_TABLE}"
+
+# Split blobs bigger than this across pd_blob_chunks rows. Postgres refuses
+# any single allocation over 1 GiB, and processing a bytea parameter can
+# roughly double its footprint server-side, so one ~500 MB tarball already
+# fails to insert (a Rocket syn rundir tars to that). 128 MiB per value
+# stays far from the cliff.
+BLOB_CHUNK_BYTES = 128 * 1024 * 1024
+
+# Checkpoints still use a single bytea value; past this compressed size the
+# insert would die at the same 1 GiB wall, so store_checkpoint refuses with
+# a clear message instead (the local checkpoint still works).
+CHECKPOINT_MAX_BYTES = 450 * 1024 * 1024
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -364,6 +378,17 @@ CREATE TABLE IF NOT EXISTS {FQ_BLOB} (
     workspace        TEXT,
     design           TEXT,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Overflow storage for pd_blobs rows too big for one bytea value (see
+-- BLOB_CHUNK_BYTES). The parent row keeps stage/size/provenance with an
+-- empty data column; the tarball bytes live here in seq order and
+-- load_stage_blob reassembles them.
+CREATE TABLE IF NOT EXISTS {FQ_BLOB_CHUNK} (
+    sha256 TEXT NOT NULL,
+    seq    INT NOT NULL,
+    data   BYTEA NOT NULL,
+    PRIMARY KEY (sha256, seq)
 );
 
 -- Per-user NAMED workspaces. A user may register multiple workspaces (keyed by
@@ -1543,7 +1568,15 @@ def store_stage_blob(
     workspace, design) are recorded so blob-list can tell you which run
     produced each row. They default to None when the caller doesn't have
     them, in which case any existing value on UPDATE is preserved.
+
+    Blobs above BLOB_CHUNK_BYTES don't fit in one bytea value (Postgres
+    caps single allocations at 1 GiB), so they're split across
+    pd_blob_chunks rows in the same transaction; the parent row keeps the
+    metadata with an empty data column and load_stage_blob reassembles.
     """
+    chunks = [data[i:i + BLOB_CHUNK_BYTES]
+              for i in range(0, len(data), BLOB_CHUNK_BYTES)]
+    inline = data if len(chunks) <= 1 else b""
     conn = _connect()
     try:
         _ensure_schema(conn, quiet=True)
@@ -1577,10 +1610,21 @@ def store_stage_blob(
                                                   {FQ_BLOB}.design),
                       created_at       = NOW()
                 """,
-                (sha256, stage_tag, psycopg2.Binary(data), len(data),
+                (sha256, stage_tag, psycopg2.Binary(inline), len(data),
                  duration_seconds, cpu_seconds, triggering_user, dag_id,
                  dag_run_id, workspace, design),
             )
+            # Drop chunks from any previous write of this sha unconditionally
+            # so an inline rewrite can't leave stale overflow rows behind.
+            cur.execute(f"DELETE FROM {FQ_BLOB_CHUNK} WHERE sha256 = %s",
+                        (sha256,))
+            if len(chunks) > 1:
+                for seq, chunk in enumerate(chunks):
+                    cur.execute(
+                        f"INSERT INTO {FQ_BLOB_CHUNK} (sha256, seq, data) "
+                        f"VALUES (%s, %s, %s)",
+                        (sha256, seq, psycopg2.Binary(chunk)),
+                    )
         conn.commit()
     finally:
         conn.close()
@@ -1607,12 +1651,28 @@ def load_stage_blob(
                 (sha256,),
             )
             row = cur.fetchone()
+            chunk_rows = []
+            if row is not None and (row[1] is None or len(row[1]) == 0):
+                # An empty data column means the tarball was too big for one
+                # bytea value and lives in pd_blob_chunks (see store side).
+                try:
+                    cur.execute(
+                        f"SELECT data FROM {FQ_BLOB_CHUNK} "
+                        f"WHERE sha256 = %s ORDER BY seq",
+                        (sha256,),
+                    )
+                    chunk_rows = cur.fetchall()
+                except psycopg2.Error:
+                    conn.rollback()
     finally:
         conn.close()
     if row is None:
         return None
     stage, data, duration_seconds, cpu_seconds = row
-    return stage, bytes(data), duration_seconds, cpu_seconds
+    blob = bytes(data) if data is not None else b""
+    if not blob and chunk_rows:
+        blob = b"".join(bytes(c[0]) for c in chunk_rows)
+    return stage, blob, duration_seconds, cpu_seconds
 
 
 # --- Durable cache-event ledger (powers the time-saved tracker) ---------------
@@ -1890,6 +1950,12 @@ def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
     else:
         data = gzip.compress(path.read_bytes())
         is_dir = False
+    if len(data) > CHECKPOINT_MAX_BYTES:
+        raise RuntimeError(
+            f"checkpoint tarball is {len(data) / 1e6:.0f} MB compressed; "
+            "single-value stores cap out near "
+            f"{CHECKPOINT_MAX_BYTES // (1024 * 1024)} MB, keeping the local "
+            "checkpoint only")
     cols = ("triggering_user", "dag_id", "dag_run_id", "workspace",
             "design", "module", "project")
     vals = [provenance.get(c) for c in cols]

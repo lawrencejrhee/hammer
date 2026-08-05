@@ -333,9 +333,16 @@ def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
             pass
         from hammer.vlsi import pd_store
         from pathlib import Path
-        size = pd_store.store_checkpoint(key, stage_tag, step, Path(path),
-                                         saved_seconds=saved,
-                                         module=module, **_provenance(driver))
+        try:
+            size = pd_store.store_checkpoint(key, stage_tag, step, Path(path),
+                                             saved_seconds=saved,
+                                             module=module,
+                                             **_provenance(driver))
+        except Exception as exc:
+            # say why the push was skipped (an oversized checkpoint is the
+            # common case) instead of vanishing into the outer catch-all
+            _log_info(driver, f"Checkpoint push skipped: {exc}")
+            return None
         _log_info(driver, f"Pushed checkpoint pre_{step} ({size / 1e6:.1f} MB "
                           "compressed) to the database for cross-machine resume.")
         return step
