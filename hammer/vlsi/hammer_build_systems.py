@@ -1108,9 +1108,13 @@ def hammer_dag():
     def start(**context):
         print("Starting Hammer Flow Pipeline Execution Orchestration...")
 
-    @task(task_id="exit_", trigger_rule=TriggerRule.NONE_FAILED)
-    def exit_(**context):
-        print("Exiting flow safely.")
+    # ALL_DONE so the savings summary prints even when an upstream stage
+    # fails; a run that cached syn but died in par still reports the time it
+    # saved (and its event log still clears). exit_ stays NONE_FAILED so a
+    # failed stage keeps failing the run -- if this task were the terminal
+    # ALL_DONE leaf instead, every failed run would show up green.
+    @task(task_id="cache_summary_", trigger_rule=TriggerRule.ALL_DONE)
+    def cache_summary_(**context):
         # Grafted (ldap-auth): print the per-run PD cache savings summary
         # (wall + CPU time saved) and clear the run's event log.
         run_id = None
@@ -1131,6 +1135,10 @@ def hammer_dag():
                     clear_run_cache_events(run_id)
             except Exception as e:
                 print(f"[cache-summary] skipped: {{e}}")
+
+    @task(task_id="exit_", trigger_rule=TriggerRule.NONE_FAILED)
+    def exit_(**context):
+        print("Exiting flow safely.")
 
     def create_module_pipeline(mod_name, suffix, paths_dict):
         with TaskGroup(group_id=f"module_{{mod_name or 'Top'}}") as tg:
@@ -1200,6 +1208,7 @@ def hammer_dag():
         return tg, p_node
 
     start_node = start()
+    summary_node = cache_summary_()
     exit_node = exit_()
 """
 
@@ -1255,6 +1264,7 @@ def hammer_dag():
     }}
     mod_tg, _ = create_module_pipeline('{top_module}', '', paths_{top_module})
     start_node >> mod_tg >> exit_node
+    mod_tg >> summary_node >> exit_node
 """
     else:
         output += "    pipelines = {}\n"
@@ -1349,6 +1359,8 @@ def hammer_dag():
         output += "    # Route all workflow paths safely to exit entrypoint\n"
         output += "    exit_drivers = [pipelines[x] for x in {0}]\n".format(all_nodes)
         output += "    exit_drivers >> exit_node\n"
+        output += "    exit_drivers >> summary_node\n"
+        output += "    summary_node >> exit_node\n"
 
     output += "\ndag_instance = hammer_dag()\n"
 
