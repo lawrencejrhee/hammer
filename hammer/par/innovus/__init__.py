@@ -219,6 +219,12 @@ class InnovusTclToPythonConverter:
         if line.startswith('set_db '):
             return self._convert_set_db(line)
         
+        # Plain Tcl variable assignment: keep it at the Tcl level (before the
+        # get_db branch, whose lossy filter translation would otherwise grab
+        # `set var [get_db ...]` and strand later $var references).
+        if line.startswith('set '):
+            return self._convert_variable_assignment(line)
+
         # Handle get_db -> db() conversions
         if 'get_db' in line:
             return self._convert_get_db_line(line)
@@ -239,7 +245,74 @@ class InnovusTclToPythonConverter:
         # Default fallback: treat as a direct Python function call
         # (all Innovus TCL commands have Python equivalents with the same name)
         return self._convert_command(line)
-    
+
+    # TCL control-flow words whose bodies have no line-by-line Python
+    # equivalent; the whole construct goes to the live Tcl interp instead.
+    _TCL_CONTROL = {'if', 'foreach', 'while', 'for', 'proc', 'switch', 'catch'}
+
+    def convert_block(self, cmd: str) -> List[str]:
+        """Convert a chunk of TCL (possibly many lines) to Python lines.
+
+        Balanced single commands go through convert_line as before. A
+        multi-line control construct (a foreach/if/while body spanning
+        lines) cannot be converted one line at a time -- doing so emits the
+        header as a bogus call, converts the body out of context, and leaves
+        an orphan closing brace. Instead the brace balance is tracked and a
+        whole balanced block is handed to the Tcl interpreter via tcl.eval,
+        which Innovus's Python engine keeps alive for exactly this.
+        """
+        out: List[str] = []
+        block: List[str] = []
+        pending = ""
+        depth = 0
+        for raw in cmd.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if depth > 0:
+                block.append(raw.rstrip())
+                depth += self._brace_delta(line)
+                if depth <= 0:
+                    out.append("tcl.eval(" + repr("\n".join(block)) + ")")
+                    block = []
+                    depth = 0
+                continue
+            if line.startswith('#'):
+                out.append(line)
+                continue
+            if line.endswith('\\') and not line.endswith('\\\\'):
+                pending += line[:-1].rstrip() + ' '
+                continue
+            if pending:
+                line = pending + line
+                pending = ""
+            first = line.split(None, 1)[0]
+            delta = self._brace_delta(line)
+            if first in self._TCL_CONTROL or delta > 0:
+                if delta > 0:
+                    block = [line]
+                    depth = delta
+                else:
+                    out.append("tcl.eval(" + repr(line) + ")")
+                continue
+            converted = self.convert_line(line)
+            if converted:
+                out.append(converted)
+        if pending:
+            converted = self.convert_line(pending.rstrip())
+            if converted:
+                out.append(converted)
+        if block:
+            # unbalanced input; hand it to Tcl rather than dropping it
+            out.append("tcl.eval(" + repr("\n".join(block)) + ")")
+        return out
+
+    @staticmethod
+    def _brace_delta(line: str) -> int:
+        """Net curly-brace balance of a line, ignoring escaped braces."""
+        s = line.replace('\\\\', '').replace('\\{', '').replace('\\}', '')
+        return s.count('{') - s.count('}')
+
     def _convert_puts(self, line: str) -> str:
         """Convert TCL puts to Python print"""
         if line.startswith('puts "'):
@@ -328,6 +401,11 @@ class InnovusTclToPythonConverter:
         match = re.match(r'set_db\s+(\S+)\s+(.+)', line)
         if match:
             attr_name = match.group(1)
+            if attr_name.startswith('$') or attr_name.startswith('['):
+                # set_db on an object list held in a Tcl variable (set_db
+                # $macros .place_status fixed) has no attribute-path Python
+                # form; keep it at the Tcl level.
+                return f"tcl.eval({line!r})"
             value = match.group(2).strip()
             py_value = self._convert_value(value)
             return f"db().{attr_name} = {py_value}"
@@ -436,6 +514,12 @@ class InnovusTclToPythonConverter:
                     named_args[flag_name] = self._convert_value(flag_value)
                     i += 2
             else:
+                if part.startswith('{'):
+                    # A braced list as a positional argument has no reliable
+                    # Python calling convention: the bridge glues the list
+                    # onto the command name without a space (set_dont_use{...})
+                    # and Tcl errors out. Keep the whole command in Tcl.
+                    return f"tcl.eval({line!r})"
                 positional_args.append(self._convert_value(part))
                 i += 1
         
@@ -648,25 +732,14 @@ class InnovusTclToPythonConverter:
         return tokens
     
     def _convert_variable_assignment(self, line: str) -> str:
-        """Convert TCL variable assignment to Python"""
-        match = re.match(r'set\s+(\w+)\s+(.+)', line)
-        if match:
-            var_name = match.group(1)
-            value = match.group(2).strip()
-            
-            if '[' in value:
-                # TCL command substitution - convert the inner command
-                inner = re.search(r'\[(.+)\]', value)
-                if inner:
-                    inner_cmd = inner.group(1).strip()
-                    converted_inner = self._convert_command(inner_cmd) if self._is_command(inner_cmd) else inner_cmd
-                    return f"{var_name} = {converted_inner}"
-                return f"{var_name} = {value}  # TODO: check TCL substitution"
-            
-            py_value = self._convert_value(value)
-            return f"{var_name} = {py_value}"
-        
-        return f"# FIXME: Could not convert variable: {line}"
+        """Keep a TCL variable assignment at the Tcl level.
+
+        Reads are converted as tcl.eval('set var'), so the variable has to
+        exist in the Tcl interpreter; translating the assignment into a
+        Python variable would strand every later $var reference (and the
+        old bracket-value translation was lossy anyway).
+        """
+        return f"tcl.eval({line!r})"
 
 class Innovus(HammerPlaceAndRouteTool, CadenceTool):
 
@@ -951,28 +1024,14 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
     def append(self, cmd: str, clean: bool = False) -> None:
         """Append a command. In Python mode, converts TCL to Python (for external hooks/tech plugins)."""
         if self.use_python:
-            converter = InnovusTclToPythonConverter()
-            for line in cmd.strip().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                converted = converter.convert_line(line)
-                if converted:
-                    self.output.append(converted)
+            self.output.extend(InnovusTclToPythonConverter().convert_block(cmd))
         else:
             super().append(cmd, clean=clean)  # type: ignore
 
     def verbose_append(self, cmd: str, clean: bool = False) -> None:
         """Append a command. In Python mode, converts TCL to Python."""
         if self.use_python:
-            converter = InnovusTclToPythonConverter()
-            for line in cmd.strip().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                converted = converter.convert_line(line)
-                if converted:
-                    self.output.append(converted)
+            self.output.extend(InnovusTclToPythonConverter().convert_block(cmd))
         else:
             super().verbose_append(cmd, clean=clean)  # type: ignore
 
@@ -2286,11 +2345,7 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
             # Manual TCL content — convert each line through the converter
             floorplan_script_contents = str(self.get_setting("par.innovus.floorplan_script_contents"))
             lines.append("# Floorplan manually specified from HAMMER")
-            converter = InnovusTclToPythonConverter()
-            for tcl_line in floorplan_script_contents.split("\n"):
-                converted = converter.convert_line(tcl_line)
-                if converted:
-                    lines.append(converted)
+            lines.extend(InnovusTclToPythonConverter().convert_block(floorplan_script_contents))
         elif floorplan_mode == "generate":
             lines.append("# Generated floorplan from HAMMER constraints")
             lines.extend(self.generate_floorplan_py())
@@ -2334,25 +2389,11 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
             else:
                 self.verbose_append("flatten_ilm")
 
+        # verbose_append converts for python mode too; the old bespoke branch
+        # here emitted read_power_intent(1801=...), which is not legal Python
+        # (numeric kwarg). The converter passes numeric flags positionally.
         for l in self.generate_power_spec_commands():
-            if self.use_python:
-                cmd = l.strip()
-                if cmd.startswith("read_power_intent"):
-                    import re as _re
-                    m = _re.search(r'-(cpf|1801)\s+(\S+)', cmd)
-                    if m:
-                        fmt, path = m.group(1), m.group(2)
-                        self.py_append(f"read_power_intent({fmt}={path!r})")
-                    else:
-                        path = cmd.split()[-1]
-                        self.py_append(f"read_power_intent({path!r})")
-                elif cmd == "commit_power_intent":
-                    self.py_append("commit_power_intent()")
-                elif cmd:
-                    parts = cmd.split()
-                    self.py_append(f"{parts[0]}()")
-            else:
-                self.verbose_append(l)
+            self.verbose_append(l)
 
         if self.use_python:
             self._generate_dont_use_commands_python()

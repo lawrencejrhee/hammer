@@ -50,28 +50,14 @@ class InnovusPlus(HammerSynthesisTool, CadenceTool):
     def append(self, cmd: str, clean: bool = False) -> None:
         """Append a command.  In Python mode, converts TCL to Python."""
         if self.use_python:
-            converter = InnovusTclToPythonConverter()
-            for line in cmd.strip().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                converted = converter.convert_line(line)
-                if converted:
-                    self.output.append(converted)
+            self.output.extend(InnovusTclToPythonConverter().convert_block(cmd))
         else:
             super().append(cmd, clean=clean)  # type: ignore
 
     def verbose_append(self, cmd: str, clean: bool = False) -> None:
         """Append a command with verbose echo.  In Python mode, converts TCL to Python."""
         if self.use_python:
-            converter = InnovusTclToPythonConverter()
-            for line in cmd.strip().splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                converted = converter.convert_line(line)
-                if converted:
-                    self.output.append(converted)
+            self.output.extend(InnovusTclToPythonConverter().convert_block(cmd))
         else:
             super().verbose_append(cmd, clean=clean)  # type: ignore
 
