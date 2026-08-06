@@ -27,7 +27,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from hammer.vlsi import pd_store
 
@@ -682,6 +682,51 @@ def _event_wall(ev: Dict[str, Any]) -> float:
     return 0.0
 
 
+def _airflow_task_windows(run_ids: List[str]) -> Dict[str, List[Tuple[float, float]]]:
+    """Per-run (start, end) epoch pairs for each substantial task, read from
+    Airflow's task_instance table.
+
+    Parallelism cannot be measured from the cache ledger alone: only stages
+    that consult the PD cache leave events there (syn, par), and those run
+    one after another. The stages that actually overlap -- drc beside lvs,
+    sibling modules in a hierarchical flow -- never appear. Airflow records
+    every task's true window, so that is the honest source.
+
+    Tasks shorter than a minute are skipped: the bridges, start and exit_
+    bookkeeping tasks all overlap trivially and would inflate the credit
+    with time no tool ever spent. Returns {} when the metadata DB is
+    unreachable, in which case the caller falls back to ledger windows.
+    """
+    if not run_ids:
+        return {}
+    try:
+        import psycopg2
+        from hammer.vlsi import pd_store
+        settings = pd_store.airflow_metadata_conn_settings()
+        if not settings:
+            return {}
+        conn = psycopg2.connect(**settings)
+    except Exception:
+        return {}
+    out: Dict[str, List[Tuple[float, float]]] = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT run_id, start_date, end_date FROM task_instance "
+                "WHERE run_id = ANY(%s) AND state = 'success' "
+                "AND start_date IS NOT NULL AND end_date IS NOT NULL "
+                "AND EXTRACT(EPOCH FROM (end_date - start_date)) >= 60",
+                (list(run_ids),))
+            for run_id, start, end in cur.fetchall():
+                out.setdefault(run_id, []).append(
+                    (start.timestamp(), end.timestamp()))
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+    return out
+
+
 def parallel_savings(events: List[Dict[str, Any]],
                      group_by: Optional[str] = None) -> Dict[str, Any]:
     """Wall-clock saved by running module tasks concurrently (task-level
@@ -708,13 +753,21 @@ def parallel_savings(events: List[Dict[str, Any]],
     total = 0.0
     n_par = 0
     groups: Dict[str, float] = defaultdict(float)
-    for evs in runs.values():
+    task_windows = _airflow_task_windows(list(runs.keys()))
+    for run_key, evs in runs.items():
         windows = []
-        for ev in evs:
-            dur = _event_wall(ev)
-            ts = ev.get("ts")
-            if dur > 0 and isinstance(ts, (int, float)):
-                windows.append((ts - dur, ts, ev))
+        # Airflow's task windows cover every stage; the ledger only covers
+        # the cached ones, so prefer the former and keep the latter as the
+        # fallback for runs the metadata DB no longer has.
+        for start, end in task_windows.get(run_key, []):
+            windows.append((start, end, evs[0]))
+        if len(windows) < 2:
+            windows = []
+            for ev in evs:
+                dur = _event_wall(ev)
+                ts = ev.get("ts")
+                if dur > 0 and isinstance(ts, (int, float)):
+                    windows.append((ts - dur, ts, ev))
         if len(windows) < 2:
             continue
         sum_dur = sum(w[1] - w[0] for w in windows)
