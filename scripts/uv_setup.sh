@@ -151,6 +151,10 @@ uv pip install "apache-airflow-providers-fab==${FAB_VERSION}"
 CPPFLAGS="-I$LDAP_LOCAL/usr/include -I/usr/include ${CPPFLAGS:-}" \
 LDFLAGS="-L$LDAP_LOCAL/usr/lib64 -L/lib64 ${LDFLAGS:-}" \
     uv pip install "python-ldap==${LDAP_VERSION}" --no-binary python-ldap
+# psycopg2 is not a base dependency (see pyproject.toml: it lives in the
+# "cache" extra so a plain hammer install needs no compiler). The studio
+# does need it, and needs it built here rather than as a wheel, so that the
+# libraries sanitized above are the ones baked into it.
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
 AIRFLOW_HOME="$(mktemp -d)" airflow version
 
