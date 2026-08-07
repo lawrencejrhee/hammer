@@ -531,6 +531,13 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
 
 def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], None],
                       proj_confs_by_tools=None, default_tools=None) -> dict:
+    # Emit hammer.d as well. Choosing the DAG should add a way to run the flow,
+    # not take one away: projects document `make syn`, `make par-<block>` and
+    # the redo- targets, and those come from the makefile include. Both
+    # generators write their own file into obj_dir, so keeping the legacy one
+    # costs nothing and leaves every existing command working.
+    build_makefile(driver, append_error_func)
+
     dependency_graph = driver.get_hierarchical_dependency_graph()
     dag_file = os.path.join(driver.obj_dir, "hammer_dag.py")
     
