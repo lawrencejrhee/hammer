@@ -2055,7 +2055,8 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         if self.use_python:
             self.py_append("time_design(post_route=True)")
             self.py_append("time_design(post_route=True, hold=True)")
-            self.py_append("check_process_antenna()")
+            # No Python binding exists for this one -- it is Tcl-only.
+            self.py_append("tcl.eval('check_process_antenna')")
         else:
             self.verbose_append("time_design -post_route")
             self.verbose_append("time_design -post_route -hold")
@@ -2067,8 +2068,11 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         tl = top_layer[0]
         ilm_lef = f"{self.top_module}ILM.lef"
         if self.use_python:
-            self.py_append(f"write_lef_abstract('5.8', top_layer={tl!r}, stripe_pins=True, pg_pin_layers=[{tl!r}], output={ilm_lef!r})")
-            self.py_append(f"write_ilm(model_type='all', to_dir={self.ilm_dir_name!r}, type_flex_ilm='ilm')")
+            # Both take arguments the Python API cannot express: the LEF
+            # version is a flag and the LEF name is positional, so keep the
+            # Tcl forms verbatim.
+            self.py_append(f"tcl.eval('write_lef_abstract -5.8 -top_layer {tl} -stripe_pins -pg_pin_layers {{{tl}}} {ilm_lef}')")
+            self.py_append(f"tcl.eval('write_ilm -model_type all -to_dir {self.ilm_dir_name} -type_flex_ilm ilm')")
         else:
             self.verbose_append(f"write_lef_abstract -5.8 -top_layer {tl} -stripe_pins -pg_pin_layers {{{tl}}} {ilm_lef}")
             self.verbose_append(f"write_ilm -model_type all -to_dir {self.ilm_dir_name} -type_flex_ilm ilm")

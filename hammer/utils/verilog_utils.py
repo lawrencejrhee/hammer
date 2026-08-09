@@ -37,7 +37,9 @@ class VerilogUtils:
         # Remove comments first to avoid false matches in the comments
         new_v = VerilogUtils.remove_comments(v)
 
-        regex = r"module\s+" + re.escape(module)
+        # The trailing boundary matters: without it, "ShuttleTile" also
+        # matches "module ShuttleTile_1".
+        regex = r"module\s+" + re.escape(module) + r"\b"
         return re.search(regex, new_v) is not None
 
     @staticmethod
@@ -53,5 +55,5 @@ class VerilogUtils:
             # Don't risk touching the source if we don't think the module exists.
             return v
 
-        regex = r"(module\s+" + re.escape(module) + ".+?endmodule)"
+        regex = r"(module\s+" + re.escape(module) + r"\b.+?endmodule)"
         return re.sub(regex, "", v, flags=re.DOTALL)
