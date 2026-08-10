@@ -620,6 +620,38 @@ class CLIDriver:
                     driver.log.error(f"Failed to compute hook fingerprint for {stage_tag}: {e}")
                     return None
 
+            # COLLATERAL FILES CHECK
+            # The config only names libraries by path, so an edited LEF or lib
+            # is otherwise invisible and stale results can be reused. Stored as
+            # a setting so both stage_change_check and the cache key see
+            # collateral edits and force a rerun.
+            try:
+                import hammer.tech as hammer_tech
+                from hammer.vlsi import pd_store
+                lib_files: List[str] = []
+                for filt in (hammer_tech.filters.lef_filter,
+                             hammer_tech.filters.timing_lib_filter,
+                             hammer_tech.filters.verilog_synth_filter,
+                             hammer_tech.filters.gds_filter):
+                    try:
+                        lib_files += driver.tech.read_libs(
+                            [filt], hammer_tech.HammerTechnologyUtils.to_plain_item,
+                            must_exist=False)
+                    except Exception:
+                        pass
+                rtl_set = set()
+                if driver.database.has_setting("synthesis.inputs.input_files"):
+                    rtl_set = set(driver.database.get_setting("synthesis.inputs.input_files", nullvalue=[]))
+                collat_fp = pd_store.compute_collateral_fingerprint(
+                    json.loads(driver.database.get_database_json()),
+                    exclude_files=rtl_set,
+                    exclude_prefixes=(driver.obj_dir,) if driver.obj_dir else (),
+                    extra_files=lib_files,
+                )
+                driver.database.set_setting("vlsi.collateral_fingerprint_sha256", collat_fp)
+            except Exception as e:
+                driver.log.error(f"Failed to compute collateral fingerprint: {e}")
+
             if action_type == "synthesis" or action_type == "syn":
                 print(driver.obj_dir)
                 if self.force_rerun or self._explicit_flow_control or driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):

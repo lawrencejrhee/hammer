@@ -112,6 +112,10 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
         except Exception:
             pass
 
+    # Collateral edits (LEF/lib files named by path) are covered by
+    # vlsi.collateral_fingerprint_sha256, stored as a setting in cli_driver so
+    # both stage_change_check and this key see them.
+
     # A tool's scripting mode (Innovus Tcl vs Python interpreter) changes the
     # scripts, the rundir layout, and the checkpoints, but is derived at run
     # time rather than being a config key of its own -- so bake the effective

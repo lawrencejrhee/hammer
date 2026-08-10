@@ -43,7 +43,7 @@ import os
 import shutil
 import tarfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
 
 try:
@@ -72,6 +72,7 @@ __all__ = [
     "compute_sha256",
     "compute_stage_key",
     "compute_rtl_fingerprint",
+    "compute_collateral_fingerprint",
     "grant_access",
     "revoke_access",
     "store_master_database",
@@ -1455,6 +1456,68 @@ def compute_rtl_fingerprint(file_paths: List[str]) -> str:
                     h.update(chunk)
         except FileNotFoundError:
             h.update(f"MISSING:{path}".encode("utf-8"))
+    return h.hexdigest()
+
+
+# Tool collateral the config names by path: physical/timing libraries,
+# extraction decks, layout.
+COLLATERAL_EXTENSIONS = (
+    ".lef", ".tlef", ".lib", ".lib.gz", ".db", ".ldb",
+    ".tluplus", ".captable", ".qrc", ".qrctech",
+    ".gds", ".gds.gz", ".oas", ".cdl", ".spi", ".sp",
+    ".v", ".sv",
+)
+
+
+def _walk_config_paths(value: Any, out: Set[str]) -> None:
+    if isinstance(value, str):
+        lower = value.lower()
+        if lower.endswith(COLLATERAL_EXTENSIONS) and os.path.isabs(value):
+            out.add(value)
+    elif isinstance(value, dict):
+        for v in value.values():
+            _walk_config_paths(v, out)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _walk_config_paths(v, out)
+
+
+def compute_collateral_fingerprint(
+    config: Dict[str, Any],
+    exclude_files: Optional[Set[str]] = None,
+    exclude_prefixes: Tuple[str, ...] = (),
+    extra_files: Optional[List[str]] = None,
+) -> str:
+    """Stat-fingerprint (path, size, mtime) of the tool collateral: library-ish
+    absolute paths found in the config values, plus ``extra_files`` (the
+    technology's own library list, which is not in the config). Stat follows
+    symlinks and is consistent across machines on shared storage. Exclusions:
+    RTL (content-fingerprinted separately) and the stage output dir (mtimes
+    churn every run).
+    """
+    exclude_files = exclude_files or set()
+    paths: Set[str] = set()
+    _walk_config_paths(config, paths)
+    keep = sorted(
+        p for p in paths
+        if p not in exclude_files
+        and not (exclude_prefixes and p.startswith(exclude_prefixes))
+    )
+    keep += sorted(set(extra_files or []))
+    h = hashlib.sha256()
+    debug_lines = []
+    for path in keep:
+        try:
+            st = os.stat(path)
+            line = f"{path}:{st.st_size}:{st.st_mtime_ns}"
+        except OSError:
+            line = f"MISSING:{path}"
+        h.update(line.encode("utf-8"))
+        debug_lines.append(line)
+    debug_out = os.environ.get("HAMMER_PD_COLLAT_DEBUG")
+    if debug_out:
+        with open(debug_out, "a") as f:
+            f.write("\n".join(debug_lines) + "\n---\n")
     return h.hexdigest()
 
 
