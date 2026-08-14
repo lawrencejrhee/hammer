@@ -1014,7 +1014,16 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
 
     @property
     def use_python(self) -> bool:
-        """True when targeting Innovus 25.1+ Python API."""
+        """Whether to emit the Innovus Python API instead of Tcl.
+
+        Off by default: the Python engine needs the INVS200 (AI) license, and
+        a site with only the INVS100 base license cannot run the generated
+        par.py at all. Turn it on with par.innovus.use_python when the license
+        is available; the version still has to be 25.1 or newer, since older
+        Innovus has no Python API.
+        """
+        if not self.get_setting("par.innovus.use_python", nullvalue=False):
+            return False
         return self.version() >= self.version_number("251")
 
     def py_append(self, python_line: str) -> None:

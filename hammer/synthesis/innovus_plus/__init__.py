@@ -40,7 +40,12 @@ class InnovusPlus(HammerSynthesisTool, CadenceTool):
 
     @property
     def use_python(self) -> bool:
-        """True when targeting Innovus 25.1+ Python API."""
+        """Whether to emit the Innovus Python API instead of Tcl.
+
+        Off by default; see par.innovus.use_python for why (INVS200 license).
+        """
+        if not self.get_setting("synthesis.innovus_plus.use_python", nullvalue=False):
+            return False
         return self.version() >= self.version_number("251")
 
     def py_append(self, python_line: str) -> None:
