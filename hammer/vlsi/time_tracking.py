@@ -363,11 +363,14 @@ def read_run_cache_summary(run_id: str) -> str:
     deplegacy_saved = 0.0   # SKIP_LOCAL, make would skip too  (wall-clock)
     resume_saved = 0.0      # RESUME, skipped completed steps  (wall-clock)
     total_ran = 0.0         # MISS_STORE           (wall-clock)
+    failed_ran = 0.0        # MISS_FAIL            (wall-clock)
+    failed_count = 0
     cache_saved_cpu = 0.0   # HIT + SKIP_RESTORED  (CPU)
     depsh_saved_cpu = 0.0
     deplegacy_saved_cpu = 0.0
     resume_saved_cpu = 0.0
     total_ran_cpu = 0.0     # MISS_STORE           (CPU)
+    failed_ran_cpu = 0.0    # MISS_FAIL            (CPU)
 
     def _wc(s: Optional[float]) -> str:
         """Format 'wall / cpu' pair for the detail column."""
@@ -446,6 +449,16 @@ def read_run_cache_summary(run_id: str) -> str:
             total_ran += tool
             if tool_cpu is not None:
                 total_ran_cpu += tool_cpu
+        elif outcome == "MISS_FAIL":
+            attribution = "—"
+            wall_col = _wc(tool)
+            cpu_col = _wc(tool_cpu)
+            detail = "FAILED (counted separately, not in savings)"
+            if tool is not None:
+                failed_ran += tool
+                failed_count += 1
+            if tool_cpu is not None:
+                failed_ran_cpu += tool_cpu
         elif outcome == "SKIP_NO_BLOB":
             attribution = "—"
             detail = "WARNING: dep-check skip but no cache blob — downstream may fail"
@@ -552,6 +565,12 @@ def _attribute_event(ev: Dict[str, Any]) -> Dict[str, Any]:
     elif outcome == "MISS_STORE" and tool is not None:
         res.update(attribution="ran", wall_ran=float(tool),
                    cpu_ran=float(tool_cpu or 0.0), quantified=True)
+    elif outcome == "MISS_FAIL" and tool is not None:
+        # Tool time spent on a stage that failed. Its own attribution so it
+        # stays out of both the savings totals and "actually ran" -- those
+        # describe work that completed.
+        res.update(attribution="failed", wall_ran=float(tool),
+                   cpu_ran=float(tool_cpu or 0.0), quantified=True)
     elif outcome in ("HIT", "SKIP_RESTORED", "SKIP_LOCAL") and saved is None:
         # We skipped a tool run but the blob predates duration tracking.
         res.update(attribution=(dep_kind if outcome == "SKIP_LOCAL" else "cache"),
@@ -612,7 +631,8 @@ def _empty_bucket() -> Dict[str, Any]:
             "depsh_wall": 0.0, "depsh_cpu": 0.0,
             "deplegacy_wall": 0.0, "deplegacy_cpu": 0.0,
             "resume_wall": 0.0, "resume_cpu": 0.0,
-            "ran_wall": 0.0, "ran_cpu": 0.0}
+            "ran_wall": 0.0, "ran_cpu": 0.0,
+            "failed_wall": 0.0, "failed_cpu": 0.0, "failures": 0}
 
 
 def _accumulate(bucket: Dict[str, Any], ev: Dict[str, Any]) -> None:
@@ -626,6 +646,8 @@ def _accumulate(bucket: Dict[str, Any], ev: Dict[str, Any]) -> None:
         bucket["skips"] += 1
     elif outcome == "SKIP_NO_BLOB":
         bucket["warnings"] += 1
+    elif outcome == "MISS_FAIL":
+        bucket["failures"] = bucket.get("failures", 0)
     a = _attribute_event(ev)
     if a["attribution"] == "cache":
         bucket["cache_wall"] += a["wall_saved"]
@@ -642,6 +664,10 @@ def _accumulate(bucket: Dict[str, Any], ev: Dict[str, Any]) -> None:
     elif a["attribution"] == "ran":
         bucket["ran_wall"] += a["wall_ran"]
         bucket["ran_cpu"] += a["cpu_ran"]
+    elif a["attribution"] == "failed":
+        bucket["failed_wall"] += a["wall_ran"]
+        bucket["failed_cpu"] += a["cpu_ran"]
+        bucket["failures"] += 1
     if a["attribution"] in ("cache", "dep-sh", "dep-legacy") and not a["quantified"]:
         bucket["unquantified"] += 1
 
@@ -936,6 +962,22 @@ def format_savings_report(events: List[Dict[str, Any]],
     lines.append(f"  Legacy-equivalent skips (no credit): {_pair(t['deplegacy_wall'], t['deplegacy_cpu'])}")
     lines.append(f"  Total skipped work (incl. legacy):  {_pair(total_saved_wall, total_saved_cpu)}")
     lines.append(f"  Time that actually ran:             {_pair(t['ran_wall'], t['ran_cpu'])}")
+    # Turnaround-time efficiency: the share of the legacy-equivalent schedule
+    # that sledgehammer removed. The baseline excludes skips legacy would have
+    # made anyway, so only sledgehammer-specific savings count.
+    tat_baseline = t["ran_wall"] + sledge_wall - t["deplegacy_wall"]
+    if tat_baseline > 0:
+        tat = 1.0 - (t["ran_wall"] / tat_baseline)
+        lines.append(f"  TAT efficiency improvement:         {tat * 100:.1f}%"
+                     f"  ({_format_duration(t['ran_wall'])} ran vs {_format_duration(tat_baseline)} legacy-equivalent)")
+    # Same ratio on CPU time. Parallel execution contributes nothing here --
+    # concurrency shortens the schedule without removing work -- so this
+    # measures only the compute the cache and dep-check never spent.
+    ctat_baseline = t["ran_cpu"] + sledge_cpu - t["deplegacy_cpu"]
+    if ctat_baseline > 0:
+        ctat = 1.0 - (t["ran_cpu"] / ctat_baseline)
+        lines.append(f"  Compute TAT efficiency improvement: {ctat * 100:.1f}%"
+                     f"  ({_format_duration(t['ran_cpu'])} cpu ran vs {_format_duration(ctat_baseline)} legacy-equivalent)")
     lines.append(f"  Cache hits / misses:                {t['hits']} hit, {t['misses']} miss "
                  f"({hit_rate:.0f}% hit rate over {decided} decided stages)")
     if t["unquantified"]:
@@ -1041,3 +1083,78 @@ def collect_savings_events(
     if db:
         return db, "postgres ledger"
     return _jsonl(), "jsonl files (ledger empty)"
+
+
+# ---------------------------------------------------------------------------
+# Failed-stage accounting
+#
+# Deliberately separate from the savings path: nothing here is called by
+# pd_cache, and none of it feeds the savings totals or the TAT figures, which
+# describe work that completed. Call record_stage_failure() from wherever a
+# failure is observed, and format_failure_report() to read the tally back.
+#
+# Caveat worth keeping in mind when reading the numbers: a stale config or
+# stale collateral can fail an entire campaign, so a large failure total says
+# something about the design's health, not about the cache.
+# ---------------------------------------------------------------------------
+
+
+def record_stage_failure(
+    stage_tag: str,
+    tool_seconds: Optional[float] = None,
+    tool_cpu_seconds: Optional[float] = None,
+    module: Optional[str] = None,
+    enabled: bool = True,
+) -> None:
+    """Record tool time spent on a stage that failed, as a MISS_FAIL event."""
+    record_event(
+        stage_tag, "MISS_FAIL",
+        tool_seconds=tool_seconds,
+        tool_cpu_seconds=tool_cpu_seconds,
+        module=module,
+        enabled=enabled,
+    )
+
+
+def aggregate_failures(events: List[Dict[str, Any]],
+                       group_by: str = "stage") -> Dict[str, Any]:
+    """Failure totals only: {failures, failed_wall, failed_cpu} plus groups."""
+    agg = aggregate_savings(events, group_by=group_by)
+    keep = ("failures", "failed_wall", "failed_cpu")
+    return {
+        "totals": {k: agg["totals"].get(k, 0) for k in keep},
+        "groups": {g: {k: b.get(k, 0) for k in keep}
+                   for g, b in agg.get("groups", {}).items()
+                   if b.get("failures")},
+    }
+
+
+def format_failure_report(events: List[Dict[str, Any]],
+                          group_by: str = "stage") -> str:
+    """Standalone report of tool time lost to failed stages."""
+    agg = aggregate_savings(events, group_by=group_by)
+    t = agg["totals"]
+    failures = t.get("failures", 0)
+    failed_wall = t.get("failed_wall", 0.0)
+    failed_cpu = t.get("failed_cpu", 0.0)
+    lines = ["FAILED STAGES (separate from the savings report)"]
+    if not failures and not failed_wall:
+        lines.append("  No failed stages recorded.")
+        return "\n".join(lines)
+    lines.append(f"  Stages that failed:          {failures}")
+    lines.append(f"  Tool time spent on failures: wall {_format_duration(failed_wall):<12}"
+                 f"  cpu {_format_duration(failed_cpu)}")
+    burn = t.get("ran_wall", 0.0) + failed_wall
+    if burn > 0:
+        lines.append(f"  Share of tool time wasted:   {failed_wall / burn * 100:.1f}%"
+                     f"  ({_format_duration(failed_wall)} failed"
+                     f" / {_format_duration(burn)} total tool time)")
+    groups = {g: b for g, b in agg.get("groups", {}).items() if b.get("failures")}
+    if groups:
+        lines.append("")
+        lines.append(f"  {'group':<30} {'failures':>9} {'wall':>12} {'cpu':>12}")
+        for g, b in sorted(groups.items(), key=lambda kv: -kv[1].get("failed_wall", 0.0)):
+            lines.append(f"  {str(g)[:30]:<30} {b.get('failures', 0):>9} "
+                         f"{_format_duration(b.get('failed_wall', 0.0)):>12} "
+                         f"{_format_duration(b.get('failed_cpu', 0.0)):>12}")
+    return "\n".join(lines)
