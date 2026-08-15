@@ -1129,6 +1129,24 @@ def hammer_dag():
             run_id = context["dag_run"].run_id
         except Exception:
             run_id = None
+        # ALL_DONE, so this is the one task that runs however the flow ended.
+        # Hand the obj_dir back before anything else, or a failed run keeps it.
+        # Tasks are separate processes, so resolve the directory the same way
+        # the stages did rather than reading OBJ_DIR out of this one's env.
+        try:
+            from hammer.shell.hammer_vlsi import _resolve_workspace_obj_dir, release_obj_dir
+            obj_dir = OBJ_DIR
+            try:
+                resolved = _resolve_workspace_obj_dir(
+                    context, DESIGN_NAME, default_obj_dir=OBJ_DIR, gen_user=GEN_USER,
+                    claim=False)
+                if resolved:
+                    obj_dir = resolved
+            except Exception:
+                pass
+            release_obj_dir(obj_dir, run_id)
+        except Exception as e:
+            print(f"WARNING: could not release the run lock: {{e}}")
         if run_id:
             try:
                 from hammer.vlsi.time_tracking import read_run_cache_summary, clear_run_cache_events

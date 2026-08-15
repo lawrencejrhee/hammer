@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import json
+import datetime
 
 # RHEL 9 workaround: Cadence tools (Genus, Innovus) need libnsl.so.1
 _libnsl_path = os.path.expanduser("~/libnsl_local/usr/lib64")
@@ -53,7 +54,8 @@ def run_cli_driver():
 from hammer.vlsi.pd_notify import notify_flow_complete as _notify_flow_complete
 
 
-def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=None):
+def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=None,
+                               claim=True):
     """
     Resolve and set OBJ_DIR in os.environ for the user who triggered this DAG run.
 
@@ -153,6 +155,8 @@ def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=N
         os.environ["HAMMER_AIRFLOW_WORKSPACE"] = os.path.dirname(default_obj_dir)
         print(f"[user-workspace] owner run: triggering_user={user!r} generated "
               f"this DAG -> using its own OBJ_DIR={default_obj_dir}")
+        if claim:
+            claim_obj_dir(default_obj_dir, dag_id, run_id, user)
         return default_obj_dir
 
     # Someone else's run (or an explicitly named workspace): resolve from the
@@ -183,7 +187,81 @@ def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=N
 
     print(f"[user-workspace] triggering_user={user!r} workspace={ws_name!r} "
           f"dag_id={dag_id!r} run_id={run_id!r} -> OBJ_DIR={obj_dir}")
+    if claim:
+        claim_obj_dir(obj_dir, dag_id, run_id, user)
     return obj_dir
+
+
+RUN_LOCK_NAME = ".sledgehammer-run.lock"
+
+
+def _run_lock_path(obj_dir):
+    return os.path.join(obj_dir, RUN_LOCK_NAME)
+
+
+def claim_obj_dir(obj_dir, dag_id, run_id, user):
+    """Claim ``obj_dir`` for this DAG run, or fail.
+
+    Tasks within one run share the directory on purpose -- that is how the
+    leaf stages run side by side. Two *different* runs sharing it is the
+    problem: they overwrite each other's rundirs and checkpoints, and the
+    losing tool dies with no error of its own. To run a second iteration at
+    the same time, trigger with conf={"workspace": "<name>"} so it resolves
+    somewhere else.
+
+    A lock left by a run that died is not reclaimed automatically; the error
+    names the file so it can be removed deliberately.
+    """
+    if not obj_dir or not run_id:
+        return
+    lock = _run_lock_path(obj_dir)
+    payload = json.dumps({
+        "dag_id": dag_id, "run_id": run_id, "user": user,
+        "pid": os.getpid(), "claimed": datetime.datetime.now().isoformat(timespec="seconds"),
+    })
+    os.makedirs(obj_dir, exist_ok=True)
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "w") as f:
+            f.write(payload)
+        return
+
+    try:
+        with open(lock) as f:
+            held = json.load(f)
+    except (OSError, ValueError):
+        held = {}
+    if str(held.get("run_id")) == str(run_id):
+        return
+    raise RuntimeError(
+        f"Error: run already in progress in {obj_dir}.\n"
+        f"  held by run {held.get('run_id')!r} (dag {held.get('dag_id')!r}, "
+        f"user {held.get('user')!r}, claimed {held.get('claimed')!r})\n"
+        f"  To run a second iteration at the same time, trigger with "
+        f'conf={{"workspace": "<name>"}}.\n'
+        f"  If that run is gone, remove {lock}"
+    )
+
+
+def release_obj_dir(obj_dir, run_id):
+    """Drop this run's claim on ``obj_dir``. Another run's claim is left alone."""
+    if not obj_dir or not run_id:
+        return
+    lock = _run_lock_path(obj_dir)
+    try:
+        with open(lock) as f:
+            held = json.load(f)
+    except (OSError, ValueError):
+        return
+    if str(held.get("run_id")) != str(run_id):
+        return
+    try:
+        os.remove(lock)
+    except OSError:
+        pass
 
 
 # The example Airflow DAGs that used to live here now sit in
