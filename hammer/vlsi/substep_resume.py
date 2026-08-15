@@ -279,10 +279,10 @@ def _provenance(driver: Any) -> dict:
         except Exception:
             project = None
     return {
-        "triggering_user": os.environ.get("HAMMER_AIRFLOW_TRIGGER_USER"),
+        "triggering_user": os.environ.get("HAMMER_AIRFLOW_TRIGGERING_USER"),
         "dag_id": os.environ.get("HAMMER_AIRFLOW_DAG_ID"),
         "dag_run_id": os.environ.get("HAMMER_AIRFLOW_RUN_ID"),
-        "workspace": os.environ.get("HAMMER_WORKSPACE"),
+        "workspace": os.environ.get("HAMMER_AIRFLOW_WORKSPACE"),
         "design": os.environ.get("HAMMER_AIRFLOW_DESIGN"),
         "project": project,
     }

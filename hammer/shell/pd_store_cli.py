@@ -1132,8 +1132,8 @@ def _cmd_checkpoints_push(args: argparse.Namespace) -> int:
         key, stage_tag, step, path,
         design=args.design or os.environ.get("HAMMER_AIRFLOW_DESIGN"),
         module=args.module, project=args.project,
-        triggering_user=os.environ.get("HAMMER_AIRFLOW_TRIGGER_USER"),
-        workspace=os.environ.get("HAMMER_WORKSPACE"))
+        triggering_user=os.environ.get("HAMMER_AIRFLOW_TRIGGERING_USER"),
+        workspace=os.environ.get("HAMMER_AIRFLOW_WORKSPACE"))
     print(f"Pushed pre_{step} ({size / 1e6:.1f} MB compressed) for stage "
           f"{stage_tag}. A rerun with matching inputs resumes from it; "
           f"see it with: studio checkpoints")

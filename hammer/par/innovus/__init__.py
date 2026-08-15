@@ -340,10 +340,6 @@ class InnovusTclToPythonConverter:
         
         return f"print({line[5:]})"
     
-    def _convert_ln(self, line: str) -> str:
-        """Convert 'ln ...' shell command to os.system()"""
-        return f"os.system('{line}')"
-
     def _convert_file_open(self, line: str) -> str:
         """Convert TCL file open to Python open()"""
         match = re.match(r'set\s+(\w+)\s+\[open\s+"([^"]+)"\s+"([^"]+)"\]', line)

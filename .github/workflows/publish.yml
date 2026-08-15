@@ -1,14 +1,8 @@
 name: hammer-publish-ci
 
-# https://nadeauinnovations.com/post/2020/08/one-version-to-rule-them-all-keeping-your-python-package-version-number-in-sync-with-git-and-poetry/
-
 on:
   release:
     types: [created]
-
-env:
-  POETRY_VERSION: "1.5.0"
-  PYTHON_VERSION: "3.9"
 
 jobs:
   publish:
@@ -16,24 +10,16 @@ jobs:
     continue-on-error: false
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
-      - name: Setup Python
-        uses: actions/setup-python@v4
+        uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install Poetry
-        uses: snok/install-poetry@v1
-        with:
-          virtualenvs-create: true
-          virtualenvs-in-project: true
-          version: ${{ env.POETRY_VERSION }}
-      - name: Create Poetry env
+          python-version: "3.11"
+      - name: Build
+        # Stamp the release tag as the package version (pyproject carries a
+        # placeholder 0.0.0), then build sdist + wheel with hatchling.
         run: |
-          poetry config virtualenvs.in-project true
-          poetry install --no-ansi
+          uv version ${{ github.event.release.tag_name }}
+          uv build
       - name: Publish
-        id: publish
-        run: |
-          poetry version $(git describe --tags --abbrev=0)
-          poetry build
-          poetry publish --username "__token__" --password ${{ secrets.PYPI_TOKEN }}
+        run: uv publish --token ${{ secrets.PYPI_TOKEN }}

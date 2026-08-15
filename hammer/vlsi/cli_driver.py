@@ -5,8 +5,10 @@
 #import pdb
 
 import argparse
+import atexit
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,6 +39,9 @@ from hammer.config import HammerJSONEncoder
 
 KEY_DIR = tempfile.mkdtemp()
 KEY_PATH = os.path.join(KEY_DIR, "key-history.json")
+# This module is imported once per hammer subprocess (one per stage per module
+# in a DAG run), so an unremoved mkdtemp accumulates a directory per task.
+atexit.register(shutil.rmtree, KEY_DIR, ignore_errors=True)
 
 def parse_optional_file_list_from_args(args_list: Any, append_error_func: Callable[[str], None]) -> List[str]:
     """Parse a possibly null list of files, validate the existence of each file, and return a list of paths (possibly
@@ -569,8 +574,13 @@ class CLIDriver:
             # 3. Tech-supplied hooks
             # 4. User-supplied hooks
             assert driver.tech is not None, "must have a technology"
-            with open(KEY_PATH, 'r') as f:
-                key_history = json.load(f)
+            # KEY_PATH is written during main()'s arg parsing; an embedder that
+            # invokes an action directly (e.g. flowgraph) never wrote it.
+            try:
+                with open(KEY_PATH, 'r') as f:
+                    key_history = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                key_history = {}
 
             # DESIGN FILES CHECK
             # Ignore comments/whitespace in RTL

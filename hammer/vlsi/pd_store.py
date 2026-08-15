@@ -16,7 +16,9 @@ field):
          (the same connection string Airflow uses for its metadata DB)
     3. Hardcoded defaults
          host=barney.eecs.berkeley.edu, port=5433,
-         db=airflow_lawrence, user=$USER, password=<none>
+         db=sledgehammer_studio, user=$USER
+       There is no default password: if none resolves from the env or
+       airflow.cfg, connecting raises rather than trying without one.
 
 So if your ``airflow.cfg`` already contains a valid
 ``sql_alchemy_conn = postgresql+psycopg2://user:pass@host:port/db`` line,
@@ -2159,8 +2161,20 @@ def tar_directory(path: Path, arcname: Optional[str] = None) -> bytes:
 
 
 def untar_to_directory(data: bytes, dest: Path) -> None:
-    """Extract a gzip tar into ``dest``. ``dest`` is created if it doesn't exist."""
+    """Extract a gzip tar into ``dest``. ``dest`` is created if it doesn't exist.
+
+    Blobs come from teammates via the shared cache, so member names must not
+    be able to write outside ``dest``: the "tar" filter strips absolute paths
+    and refuses ``..`` traversal. The stricter "data" filter would also reject
+    symlinks with absolute targets, which rundirs legitimately contain (the
+    innovus ``post_*`` and ``latest`` links point at absolute paths), so it
+    would break par restores.
+    """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        tar.extractall(path=str(dest))
+        if hasattr(tarfile, "tar_filter"):
+            tar.extractall(path=str(dest), filter="tar")
+        else:
+            # Python without the extraction-filter backport (pre 3.9.17 line).
+            tar.extractall(path=str(dest))
