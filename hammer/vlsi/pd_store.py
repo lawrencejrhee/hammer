@@ -44,6 +44,7 @@ import json
 import os
 import shutil
 import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import unquote, urlparse
@@ -2160,6 +2161,17 @@ def tar_directory(path: Path, arcname: Optional[str] = None) -> bytes:
     return buf.getvalue()
 
 
+def _discard(path: Path) -> None:
+    """Remove a file, symlink, or directory. Missing paths are fine."""
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def untar_to_directory(data: bytes, dest: Path) -> None:
     """Extract a gzip tar into ``dest``. ``dest`` is created if it doesn't exist.
 
@@ -2167,14 +2179,40 @@ def untar_to_directory(data: bytes, dest: Path) -> None:
     be able to write outside ``dest``: the "tar" filter strips absolute paths
     and refuses ``..`` traversal. The stricter "data" filter would also reject
     symlinks with absolute targets, which rundirs legitimately contain (the
-    innovus ``post_*`` and ``latest`` links point at absolute paths), so it
-    would break par restores.
+    innovus ``post_*`` links point at absolute paths), so it would break par
+    restores.
+
+    Extraction goes to a staging directory and only moves into ``dest`` once
+    the whole archive has been read, so a rejected or truncated blob leaves
+    the previous contents untouched instead of a half-written rundir. Staging
+    also keeps the filter from resolving through symlinks left by an earlier
+    restore: those point into the workspace that produced them, so extracting
+    the same blob twice on top of itself would otherwise be refused as an
+    escape from ``dest``.
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        if hasattr(tarfile, "tar_filter"):
-            tar.extractall(path=str(dest), filter="tar")
-        else:
-            # Python without the extraction-filter backport (pre 3.9.17 line).
-            tar.extractall(path=str(dest))
+    staging = Path(tempfile.mkdtemp(prefix=".untar-", dir=str(dest)))
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+            if hasattr(tarfile, "tar_filter"):
+                tar.extractall(path=str(staging), filter="tar")
+            else:
+                # Python without the extraction-filter backport (pre 3.9.17 line).
+                tar.extractall(path=str(staging))
+
+        for entry in staging.iterdir():
+            target = dest / entry.name
+            displaced = dest / f"{entry.name}.replaced-{os.getpid()}"
+            _discard(displaced)
+            if os.path.lexists(target):
+                os.replace(target, displaced)
+            try:
+                os.replace(entry, target)
+            except OSError:
+                if os.path.lexists(displaced):
+                    os.replace(displaced, target)
+                raise
+            _discard(displaced)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
