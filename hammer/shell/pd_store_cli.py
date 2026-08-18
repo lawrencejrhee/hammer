@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -1445,6 +1446,34 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_ws_show.set_defaults(func=_cmd_workspace_show)
 
+
+    p_ne = sub.add_parser(
+        "notify-email",
+        help="Show or set the flow-completion email for a user (no args: list all).",
+    )
+    p_ne.add_argument("uid", nargs="?", help="Username (default: list every registration).")
+    p_ne.add_argument("address", nargs="?", help="Email address to register for uid.")
+    p_ne.set_defaults(func=_cmd_notify_email)
+
+    p_ss = sub.add_parser(
+        "smtp-setup",
+        help="Configure the SMTP sender for completion emails (writes ~/.sledgehammer/smtp.env).",
+    )
+    p_ss.add_argument("--user", required=True, help="SMTP account / sender address.")
+    p_ss.add_argument("--host", default="smtp.gmail.com", help="SMTP host (default: smtp.gmail.com).")
+    p_ss.add_argument("--port", default="587", help="SMTP port (default: 587).")
+    p_ss.add_argument("--sender", help="From address if different from --user.")
+    p_ss.add_argument("--password-file",
+                      help="Existing password file to reference instead of prompting.")
+    p_ss.set_defaults(func=_cmd_smtp_setup)
+
+    p_nt = sub.add_parser(
+        "notify-test",
+        help="Send a test email through the real notification path.",
+    )
+    p_nt.add_argument("--to", help="Recipient (default: your registered notify email).")
+    p_nt.set_defaults(func=_cmd_notify_test)
+
     p_ws_set = sub.add_parser(
         "workspace-set",
         help="Set or update a named workspace root for a user.",
@@ -1734,6 +1763,110 @@ def _build_parser() -> argparse.ArgumentParser:
     p_cclr.set_defaults(func=_cmd_cache_events_clear)
 
     return parser
+
+
+
+
+def _smtp_env_path() -> str:
+    return os.path.expanduser("~/.sledgehammer/smtp.env")
+
+
+def _load_smtp_env() -> None:
+    """Load SLEDGE_SMTP_* from the smtp.env file when the shell hasn't."""
+    if os.environ.get("SLEDGE_SMTP_USER"):
+        return
+    path = _smtp_env_path()
+    if not os.path.exists(path):
+        return
+    for line in open(path):
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export "):]
+        if "=" in line and line.split("=", 1)[0].startswith("SLEDGE_SMTP_"):
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k, v.strip().strip('"'))
+
+
+def _cmd_notify_email(args: argparse.Namespace) -> int:
+    """Show or set the flow-completion email address for a user."""
+    if args.address:
+        pd_store.set_notify_email(args.uid, args.address)
+        print(f"notify email for {args.uid} -> {args.address}")
+        return 0
+    if args.uid:
+        addr = pd_store.get_notify_email(args.uid)
+        print(f"{args.uid}: {addr or '(none registered)'}")
+        return 0
+    with pd_store._connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT uid, email FROM {pd_store.FQ_NOTIFY_EMAIL} ORDER BY uid")
+            rows = cur.fetchall()
+    if not rows:
+        print("no notify emails registered")
+    for uid, email in rows:
+        print(f"{uid}: {email}")
+    return 0
+
+
+def _cmd_smtp_setup(args: argparse.Namespace) -> int:
+    """Write the SMTP sender config + password file, CLI only, no UI."""
+    import getpass
+    envd = os.path.dirname(_smtp_env_path())
+    os.makedirs(envd, exist_ok=True)
+    os.chmod(envd, 0o700)
+
+    pw_file = args.password_file
+    if not pw_file:
+        pw = getpass.getpass(f"SMTP password for {args.user} (input hidden): ")
+        if not pw:
+            print("empty password; aborting", file=sys.stderr)
+            return 2
+        pw_file = os.path.join(envd, ".smtp_password")
+        fd = os.open(pw_file, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(pw + "\n")
+
+    lines = [
+        f'export SLEDGE_SMTP_USER="{args.user}"',
+        f'export SLEDGE_SMTP_HOST="{args.host}"',
+        f'export SLEDGE_SMTP_PORT="{args.port}"',
+        f'export SLEDGE_SMTP_FROM="{args.sender or args.user}"',
+        f'export SLEDGE_SMTP_PASSWORD_FILE="{pw_file}"',
+    ]
+    path = _smtp_env_path()
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print(f"wrote {path} (0600); password file: {pw_file}")
+    print("verify with:  studio notify-test")
+    return 0
+
+
+def _cmd_notify_test(args: argparse.Namespace) -> int:
+    """Send a test completion email through the real pd_notify path."""
+    import getpass
+    _load_smtp_env()
+    to = args.to
+    if not to:
+        uid = getpass.getuser()
+        to = pd_store.get_notify_email(uid)
+        if not to:
+            print(f"no --to given and no notify email registered for {uid}; "
+                  f"register one:  studio notify-email {uid} you@example.com",
+                  file=sys.stderr)
+            return 2
+    if not os.environ.get("SLEDGE_SMTP_USER"):
+        print("no SMTP sender configured; run:  studio smtp-setup --user <sender-address>",
+              file=sys.stderr)
+        return 2
+    from hammer.vlsi.pd_notify import _send_completion_email
+    _send_completion_email(
+        to, "[SledgeHammer] test notification",
+        "<p>This is a test of the flow-completion email path. "
+        "If you are reading it, notifications work.</p>")
+    print(f"test email attempted to {to} -- check the inbox "
+          f"(errors above, if any, came from the SMTP server)")
+    return 0
 
 
 def main(argv: List[str] | None = None) -> int:

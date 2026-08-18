@@ -639,6 +639,13 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         from airflow.models import Param
         from airflow.utils.task_group import TaskGroup
         from airflow.utils.trigger_rule import TriggerRule
+
+# Flow-completion emails. Resolved at parse time; a missing/undeliverable
+# notifier must never break DAG parsing, so failure degrades to None.
+try:
+    from hammer.vlsi.pd_notify import notify_flow_complete as _notify_flow_complete
+except Exception:
+    _notify_flow_complete = None
         from airflow.exceptions import AirflowSkipException, AirflowFailException
 
         HAMMER_EXEC = "{hammer_exec}"
@@ -1078,6 +1085,8 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
     default_args=default_args,
     schedule=None,
     catchup=False,
+    on_success_callback=_notify_flow_complete,
+    on_failure_callback=_notify_flow_complete,
     params={{
         'sim_rtl': Param(default=False, type='boolean', title='RTL Simulation'),
         'power_rtl': Param(default=False, type='boolean', title='RTL Power Simulation'),
