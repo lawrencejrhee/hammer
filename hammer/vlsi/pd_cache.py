@@ -284,14 +284,6 @@ def cache_or_run(
                 design=os.environ.get("HAMMER_AIRFLOW_DESIGN") or os.environ.get("design") or None,
             )
             store_seconds = time.monotonic() - _store_t0
-            _record_cache_event(
-                stage_tag, "MISS_STORE",
-                tool_seconds=duration_seconds,
-                tool_cpu_seconds=cpu_seconds,
-                store_seconds=store_seconds,
-                module=module,
-                enabled=ledger_on,
-            )
             cpu_msg = (
                 f", CPU={_format_duration(cpu_seconds)}"
                 if cpu_seconds is not None else ""
@@ -302,7 +294,20 @@ def cache_or_run(
                 f"tool runtime={_format_duration(duration_seconds)}{cpu_msg})."
             )
         except Exception as e:
+            store_seconds = None
             _warn(f"PD cache: store failed ({e}); continuing.")
+        # The event is the record that the stage RAN; it must not vanish just
+        # because the blob upload did. A store failure leaves store_seconds
+        # empty, and the JSONL side of record_event works with no database at
+        # all -- that was the point of writing it first.
+        _record_cache_event(
+            stage_tag, "MISS_STORE",
+            tool_seconds=duration_seconds,
+            tool_cpu_seconds=cpu_seconds,
+            store_seconds=store_seconds,
+            module=module,
+            enabled=ledger_on,
+        )
     return success, output
 
 
