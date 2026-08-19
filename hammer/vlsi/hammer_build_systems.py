@@ -640,12 +640,12 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         from airflow.utils.task_group import TaskGroup
         from airflow.utils.trigger_rule import TriggerRule
 
-# Flow-completion emails. Resolved at parse time; a missing/undeliverable
-# notifier must never break DAG parsing, so failure degrades to None.
-try:
-    from hammer.vlsi.pd_notify import notify_flow_complete as _notify_flow_complete
-except Exception:
-    _notify_flow_complete = None
+        # Flow-completion emails. Resolved at parse time; a missing/undeliverable
+        # notifier must never break DAG parsing, so failure degrades to None.
+        try:
+            from hammer.vlsi.pd_notify import notify_flow_complete as _notify_flow_complete
+        except Exception:
+            _notify_flow_complete = None
         from airflow.exceptions import AirflowSkipException, AirflowFailException
 
         HAMMER_EXEC = "{hammer_exec}"
@@ -1173,6 +1173,32 @@ def hammer_dag():
     @task(task_id="exit_", trigger_rule=TriggerRule.NONE_FAILED)
     def exit_(**context):
         print("Exiting flow safely.")
+        return "ok"
+
+    # The completion mail is sent from a task, not from the DAG's
+    # on_success/on_failure callbacks: Airflow 3.1 serializes a DAG without any
+    # record of those callbacks, so the scheduler never dispatches them and
+    # they go silently unrun. ALL_DONE means this runs however the flow ended.
+    # exit_ only succeeds when nothing failed, so its XCom is the outcome
+    # signal. We re-raise on a bad flow to keep a failed run red -- this is the
+    # terminal leaf now, and a leaf that always succeeded would paint every
+    # failed run green.
+    @task(task_id="notify_", trigger_rule=TriggerRule.ALL_DONE, retries=0)
+    def notify_(**context):
+        ok = False
+        try:
+            ti = context.get("ti")
+            ok = ti is not None and ti.xcom_pull(task_ids="exit_") == "ok"
+        except Exception as e:
+            print(f"[notify] could not read the exit_ status: {{e}}")
+        state = "success" if ok else "failed"
+        try:
+            from hammer.vlsi.pd_notify import notify_run_finished
+            notify_run_finished(context, state, gen_user=GEN_USER)
+        except Exception as e:
+            print(f"[notify] completion mail skipped: {{e}}")
+        if not ok:
+            raise AirflowFailException("flow failed upstream; completion mail sent")
 
     def create_module_pipeline(mod_name, suffix, paths_dict):
         with TaskGroup(group_id=f"module_{{mod_name or 'Top'}}") as tg:
@@ -1244,6 +1270,7 @@ def hammer_dag():
     start_node = start()
     summary_node = cache_summary_()
     exit_node = exit_()
+    notify_node = notify_()
 """
 
     # 4. Programmatic Inter-Module Routing Map
@@ -1299,6 +1326,7 @@ def hammer_dag():
     mod_tg, _ = create_module_pipeline('{top_module}', '', paths_{top_module})
     start_node >> mod_tg >> exit_node
     mod_tg >> summary_node >> exit_node
+    exit_node >> notify_node
 """
     else:
         output += "    pipelines = {}\n"
@@ -1395,6 +1423,7 @@ def hammer_dag():
         output += "    exit_drivers >> exit_node\n"
         output += "    exit_drivers >> summary_node\n"
         output += "    summary_node >> exit_node\n"
+        output += "    exit_node >> notify_node\n"
 
     output += "\ndag_instance = hammer_dag()\n"
 
