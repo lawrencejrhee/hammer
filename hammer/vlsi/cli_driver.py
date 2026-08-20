@@ -71,6 +71,33 @@ def get_nonempty_str(arg: Any) -> Optional[str]:
     return None
 
 
+def _lvs_report_verdict(run_dir: str) -> Optional[str]:
+    """The boxed verdict from a Calibre-style lvs_results.rpt, or None.
+
+    Returns "CORRECT", "INCORRECT", or "NOT COMPARED" when the report's
+    OVERALL COMPARISON RESULTS banner is found; None when the report is
+    missing or unrecognized (another LVS tool's format), in which case the
+    caller keeps the tool's own exit status.
+    """
+    rpt = os.path.join(run_dir, "lvs_results.rpt")
+    try:
+        with open(rpt, errors="ignore") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    for i, l in enumerate(lines):
+        if "OVERALL COMPARISON RESULTS" in l:
+            window = "".join(lines[i:i + 15])
+            if "NOT COMPARED" in window:
+                return "NOT COMPARED"
+            if "INCORRECT" in window:
+                return "INCORRECT"
+            if "CORRECT" in window:
+                return "CORRECT"
+            return None
+    return None
+
+
 def dump_config_to_json_file(output_path: str, config: dict) -> None:
     """
     Helper function to dump the given config to the given output path while overwriting it if it already exists.
@@ -652,13 +679,32 @@ class CLIDriver:
                 rtl_set = set()
                 if driver.database.has_setting("synthesis.inputs.input_files"):
                     rtl_set = set(driver.database.get_setting("synthesis.inputs.input_files", nullvalue=[]))
+                cfg_snapshot = json.loads(driver.database.get_database_json())
+                # Spice netlists are consumed by LVS alone, so they get their
+                # own stage-scoped fingerprint (the "lvs." prefix means only
+                # lvs's stage_change_check compares it, same as the hooks
+                # fingerprints) and are excluded from the shared one. Without
+                # the split, an LVS-only collateral fix marks synthesis stale
+                # and costs a full re-syn + re-par. Both keys are computed on
+                # every invocation so every committed master snapshot carries
+                # both -- a snapshot missing one would ping-pong other stages
+                # stale.
+                _LVS_ONLY_FIELDS = ("spice_file", "spice_model_file")
                 collat_fp = pd_store.compute_collateral_fingerprint(
-                    json.loads(driver.database.get_database_json()),
+                    cfg_snapshot,
                     exclude_files=rtl_set,
                     exclude_prefixes=(driver.obj_dir,) if driver.obj_dir else (),
                     extra_files=lib_files,
+                    exclude_fields=_LVS_ONLY_FIELDS,
                 )
                 driver.database.set_setting("vlsi.collateral_fingerprint_sha256", collat_fp)
+                lvs_fp = pd_store.compute_collateral_fingerprint(
+                    cfg_snapshot,
+                    exclude_files=rtl_set,
+                    exclude_prefixes=(driver.obj_dir,) if driver.obj_dir else (),
+                    include_fields=_LVS_ONLY_FIELDS,
+                )
+                driver.database.set_setting("lvs.collateral_fingerprint_sha256", lvs_fp)
             except Exception as e:
                 driver.log.error(f"Failed to compute collateral fingerprint: {e}")
 
@@ -1039,6 +1085,22 @@ class CLIDriver:
                         driver.database.revert_rerun(stage = "lvs", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("LVS tool did not succeed")
                         return None
+                    # The tool exiting 0 is not a verdict. Calibre writes a
+                    # report whose banner says CORRECT, INCORRECT, or NOT
+                    # COMPARED (netlist compile failed, comparison never ran);
+                    # treating exit 0 as success let runs go green, and email
+                    # congratulations, for an LVS that verified nothing.
+                    verdict = _lvs_report_verdict(driver.lvs_tool.run_dir)
+                    if verdict in ("NOT COMPARED", "INCORRECT"):
+                        driver.database.revert_rerun(stage = "lvs", filename = driver.obj_dir + "/master_database.json")
+                        driver.log.error(
+                            f"LVS report verdict is {verdict}: "
+                            + ("the comparison never ran (see the compiler errors "
+                               "at the top of lvs_results.rpt)" if verdict == "NOT COMPARED"
+                               else "layout and schematic do not match (see lvs_results.rpt)"))
+                        return None
+                    if verdict == "CORRECT":
+                        driver.log.info("LVS report verdict: CORRECT")
                     post_run_func_checked(driver)
                     driver.database.commit_master_database()
                     dump_config_to_json_file(os.path.join(driver.lvs_tool.run_dir, "lvs-output.json"), output)

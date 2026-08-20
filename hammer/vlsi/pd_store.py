@@ -1493,17 +1493,32 @@ COLLATERAL_EXTENSIONS = (
 )
 
 
-def _walk_config_paths(value: Any, out: Set[str]) -> None:
+def _walk_config_paths(value: Any, out: Set[str], field: Optional[str] = None,
+                       include_fields: Optional[Tuple[str, ...]] = None,
+                       exclude_fields: Tuple[str, ...] = ()) -> None:
+    """Collect collateral-looking absolute paths from config values.
+
+    ``field`` is the nearest enclosing dict key, so paths can be kept or
+    dropped by the field that names them (a list under "spice_file" keeps
+    that field for every element). include_fields keeps ONLY those fields;
+    exclude_fields drops them; both default to the old keep-everything walk.
+    """
     if isinstance(value, str):
         lower = value.lower()
         if lower.endswith(COLLATERAL_EXTENSIONS) and os.path.isabs(value):
+            if field in exclude_fields:
+                return
+            if include_fields is not None and field not in include_fields:
+                return
             out.add(value)
     elif isinstance(value, dict):
-        for v in value.values():
-            _walk_config_paths(v, out)
+        for k, v in value.items():
+            _walk_config_paths(v, out, field=k, include_fields=include_fields,
+                               exclude_fields=exclude_fields)
     elif isinstance(value, (list, tuple)):
         for v in value:
-            _walk_config_paths(v, out)
+            _walk_config_paths(v, out, field=field, include_fields=include_fields,
+                               exclude_fields=exclude_fields)
 
 
 def compute_collateral_fingerprint(
@@ -1511,6 +1526,8 @@ def compute_collateral_fingerprint(
     exclude_files: Optional[Set[str]] = None,
     exclude_prefixes: Tuple[str, ...] = (),
     extra_files: Optional[List[str]] = None,
+    include_fields: Optional[Tuple[str, ...]] = None,
+    exclude_fields: Tuple[str, ...] = (),
 ) -> str:
     """Stat-fingerprint (path, size, mtime) of the tool collateral: library-ish
     absolute paths found in the config values, plus ``extra_files`` (the
@@ -1518,10 +1535,18 @@ def compute_collateral_fingerprint(
     symlinks and is consistent across machines on shared storage. Exclusions:
     RTL (content-fingerprinted separately) and the stage output dir (mtimes
     churn every run).
+
+    include_fields / exclude_fields scope the config walk by the field name
+    that holds each path, so a fingerprint can cover only the collateral a
+    given stage consumes (e.g. spice files belong to LVS alone -- an edit
+    there must not mark synthesis stale). Fields nobody classified stay in
+    the default fingerprint: the safe failure mode is a wasted rebuild,
+    never a stale result that skips.
     """
     exclude_files = exclude_files or set()
     paths: Set[str] = set()
-    _walk_config_paths(config, paths)
+    _walk_config_paths(config, paths, include_fields=include_fields,
+                       exclude_fields=exclude_fields)
     keep = sorted(
         p for p in paths
         if p not in exclude_files
