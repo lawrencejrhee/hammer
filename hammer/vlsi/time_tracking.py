@@ -722,34 +722,75 @@ def _airflow_task_windows(run_ids: List[str]) -> Dict[str, List[Tuple[float, flo
     bookkeeping tasks all overlap trivially and would inflate the credit
     with time no tool ever spent. Returns {} when the metadata DB is
     unreachable, in which case the caller falls back to ledger windows.
+
+    Failed tasks count too. A module that ran three hours beside its siblings
+    and then failed still had those three hours masked by the parallel flow --
+    the wall-clock saving happened whether or not the stage succeeded, and a
+    hierarchical run that dies in one leaf is exactly where parallelism pays.
+    Skipped and upstream_failed tasks never executed, so they stay excluded
+    (the one-minute floor drops them anyway).
     """
     if not run_ids:
         return {}
+    import os
     try:
         import psycopg2
         from hammer.vlsi import pd_store
-        settings = pd_store.airflow_metadata_conn_settings()
-        if not settings:
-            return {}
-        conn = psycopg2.connect(**settings)
     except Exception:
         return {}
-    out: Dict[str, List[Tuple[float, float]]] = {}
+
+    # A ledger outlives the Airflow instance that produced it: runs migrate
+    # between servers, and a merged ledger spans several. Querying only the
+    # currently-configured metadata DB silently scores every run from every
+    # other instance as perfectly sequential. SLEDGE_EXTRA_METADATA_CONNS is a
+    # comma-separated list of extra postgres URIs to union in.
+    sources = []
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT run_id, start_date, end_date FROM task_instance "
-                "WHERE run_id = ANY(%s) AND state = 'success' "
-                "AND start_date IS NOT NULL AND end_date IS NOT NULL "
-                "AND EXTRACT(EPOCH FROM (end_date - start_date)) >= 60",
-                (list(run_ids),))
-            for run_id, start, end in cur.fetchall():
-                out.setdefault(run_id, []).append(
-                    (start.timestamp(), end.timestamp()))
+        primary = pd_store.airflow_metadata_conn_settings()
+        if primary:
+            sources.append(primary)
     except Exception:
+        pass
+    for uri in (os.environ.get("SLEDGE_EXTRA_METADATA_CONNS") or "").split(","):
+        uri = uri.strip()
+        if not uri:
+            continue
+        try:
+            sources.append(pd_store._parse_conn_uri(uri))
+        except Exception:
+            continue
+    if not sources:
         return {}
-    finally:
-        conn.close()
+
+    # (run_id, start, end) deduped: the same run can exist in more than one
+    # metadata DB after a migration, and counting its tasks twice would
+    # invent overlap that never happened.
+    seen: set = set()
+    out: Dict[str, List[Tuple[float, float]]] = {}
+    for settings in sources:
+        try:
+            conn = psycopg2.connect(connect_timeout=20, **settings)
+        except Exception:
+            continue
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT run_id, start_date, end_date FROM task_instance "
+                    "WHERE run_id = ANY(%s) AND state IN ('success', 'failed') "
+                    "AND start_date IS NOT NULL AND end_date IS NOT NULL "
+                    "AND EXTRACT(EPOCH FROM (end_date - start_date)) >= 60",
+                    (list(run_ids),))
+                for run_id, start, end in cur.fetchall():
+                    key = (run_id, start.timestamp(), end.timestamp())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.setdefault(run_id, []).append(
+                        (start.timestamp(), end.timestamp()))
+        except Exception:
+            pass
+        finally:
+            conn.close()
     return out
 
 
