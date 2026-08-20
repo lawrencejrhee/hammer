@@ -5,7 +5,7 @@ Quick guide for getting the cache and permissions running against any Postgres c
 ## What you need
 
 - A Postgres cluster you control (laptop, lab server, RDS, conda Postgres, whatever). You need to be able to `CREATE DATABASE` and `CREATE ROLE` on it.
-- This repo, on the `sledgehammer_merged` branch.
+- This repo, on the `master` branch.
 - A working venv (we use `.venv/` at the repo root).
 
 ## Setup
@@ -15,7 +15,7 @@ Quick guide for getting the cache and permissions running against any Postgres c
 ```bash
 git clone https://github.com/lawrencejrhee/hammer.git
 cd hammer
-git checkout sledgehammer_merged
+git checkout master
 source ./venv.sh
 ```
 
@@ -62,7 +62,7 @@ The `WITH ADMIN OPTION` part is what lets you add and remove members later witho
 studio init
 ```
 
-This creates the `hammer_poc` schema, three tables (`master_databases`, `pd_blobs`, `pd_artifacts`), indexes, and applies default-deny on the schema with grants to `sledgehammer_users`. Idempotent, so re-running it later is fine.
+This creates the `hammer_poc` schema and its full table set (the artifact cache and its overflow chunks, master databases, checkpoints, the cache-event ledger, workspaces, the login whitelist, TOTP secrets, and notification addresses), plus indexes, and applies default-deny on the schema with grants to `sledgehammer_users`. Idempotent, so re-running it later is fine.
 
 ### 6. Verify
 
@@ -88,7 +88,7 @@ To remove someone:
 studio revoke their_postgres_username
 ```
 
-Anyone outside the group can't connect to the cache database at all. Postgres rejects them at the `CONNECT` check before any row-level logic runs.
+Anyone outside the group is refused by Postgres itself: the `hammer_poc` schema is default-denied, so a non-member's queries fail with `permission denied for schema hammer_poc` (the exact symptom listed in the gotchas below).
 
 ## Running with the cache
 

@@ -1,6 +1,6 @@
 # SledgeHammer Studio: Postgres-backed cache for Hammer PD runs
 
-> **Renamed:** this CLI is now **`studio`** (formerly `hammer-pd-store`) — same commands, shorter name. If you have `hammer-pd-store` in muscle memory, just type `studio` instead.
+> **Renamed:** this CLI is now **`studio`** (formerly `hammer-pd-store`), with the same commands under a shorter name. If you have `hammer-pd-store` in muscle memory, just type `studio` instead.
 
 A storage layer for Hammer that caches per stage build directories in
 Postgres, keyed by a content hash of the inputs that determine each stage's
@@ -32,8 +32,8 @@ decision on theirs.
 
 ## Tables
 
-All three live in the `hammer_poc` schema inside `airflow_lawrence` on
-`barney.eecs.berkeley.edu:5433`.
+All tables live in the `hammer_poc` schema of the cache database (default
+`sledgehammer_studio`; override host/db with `HAMMER_PG_*`, see DATABASE_SETUP.md).
 
 ```sql
 CREATE TABLE hammer_poc.pd_artifacts (
@@ -226,7 +226,7 @@ Resolved in order. First hit wins per field.
 2. `sql_alchemy_conn` parsed out of `airflow.cfg`. Looked up at
    `$AIRFLOW_HOME/airflow.cfg`, then `./airflow.cfg`, then
    `~/airflow/airflow.cfg`.
-3. Hardcoded defaults: `barney.eecs.berkeley.edu:5433/airflow_lawrence`,
+3. Hardcoded defaults: `barney.eecs.berkeley.edu:5433/sledgehammer_studio`,
    user `$USER`, password required (will raise if nothing resolves).
 
 `venv.sh` exports `AIRFLOW_HOME=$(pwd)`, so sourcing it from the Hammer
