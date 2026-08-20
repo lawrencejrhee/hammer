@@ -1026,7 +1026,7 @@ class CLIDriver:
             elif action_type == "lvs":
                 if self.force_rerun or driver.database.stage_change_check(stage = "lvs", filename = driver.obj_dir + "/master_database.json"):
                     if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
-                        driver.database.revert_rerun(stage = "drc", filename = driver.obj_dir + "/master_database.json")
+                        driver.database.revert_rerun(stage = "lvs", filename = driver.obj_dir + "/master_database.json")
                         return None
                     else:
                         post_load_func_checked(driver)
@@ -1036,7 +1036,7 @@ class CLIDriver:
                             driver.tech.get_tech_lvs_hooks(driver.lvs_tool.name) + \
                             list(extra_hooks or []))
                     if not success:
-                        driver.database.revert_rerun(stage = "drc", filename = driver.obj_dir + "/master_database.json")
+                        driver.database.revert_rerun(stage = "lvs", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error("LVS tool did not succeed")
                         return None
                     post_run_func_checked(driver)

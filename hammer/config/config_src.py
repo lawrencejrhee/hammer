@@ -1337,6 +1337,33 @@ class HammerDatabase:
             master_path.write_text(contents)
             print(f"Updated Database exported to {master_path}")
             self._pending_master_db = None
+            self._mirror_master_to_db(master_path, contents)
+
+    def _mirror_master_to_db(self, master_path: Path, contents_str: str) -> None:
+        """Mirror a master_database.json write into Postgres.
+
+        The on-disk file is mutable and last-writer-wins; anything that
+        clobbers it (a collision, a bad run, a fat-fingered edit) erases the
+        dependency state with no way back. The mirror stores each write as a
+        content-hashed pd_artifacts row (append-only history) plus the
+        master_databases row for the design, so any prior state is
+        recoverable. Best-effort: database trouble must never fail a flow
+        that already succeeded on disk.
+        """
+        if os.environ.get("HAMMER_PD_CACHE", "") in ("", "0", "false", "False", "no"):
+            return
+        design = os.environ.get("HAMMER_AIRFLOW_DESIGN", "")
+        if not design:
+            return
+        try:
+            from hammer.vlsi import pd_store
+            contents = json.loads(contents_str)
+            pd_store.store_artifact(contents, kind="master-database", design=design)
+            pd_store.store_master_database(design, contents)
+            print(f"[master-db] mirrored {master_path} to postgres (design {design})")
+        except Exception as e:
+            print(f"[master-db] WARNING: postgres mirror failed ({e}); "
+                  f"the on-disk file at {master_path} is the only copy of this write")
 
     def revert_rerun(self, stage: str, filename: str = "master_database.json"):
         """
@@ -1363,6 +1390,7 @@ class HammerDatabase:
         master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
         master_path.write_text(master_db_contents_str)
         print(f"Updated Database exported to {master_path}")
+        self._mirror_master_to_db(master_path, master_db_contents_str)
 
 def load_config_from_string(contents: str, is_yaml: bool, path: str = "unspecified") -> dict:
     """

@@ -90,6 +90,40 @@ def is_cache_enabled(driver: Optional[Any] = None) -> bool:
     return False
 
 
+class CacheRestoreContested(RuntimeError):
+    """The rundir's obj_dir is locked by a different run; restore would demolish it.
+
+    A restore replaces the whole rundir (staging + os.replace + rmtree of the
+    old contents). Doing that under a live tool takes away its working
+    directory mid-run. This error must fail the calling task, never downgrade
+    to "run the tool locally" -- running in a contested directory is the same
+    collision by other means.
+    """
+
+
+def _check_restore_allowed(rundir_path: Path) -> None:
+    """Refuse to extract when another run holds the obj_dir lock.
+
+    The lock file name matches hammer.shell.hammer_vlsi.RUN_LOCK_NAME (not
+    imported to keep this module free of shell deps). No lock, an unreadable
+    lock, or our own run's lock all allow the restore.
+    """
+    lock = rundir_path.parent / ".sledgehammer-run.lock"
+    try:
+        held = json.loads(lock.read_text())
+    except (OSError, ValueError):
+        return
+    holder = str(held.get("run_id"))
+    ours = os.environ.get("HAMMER_AIRFLOW_RUN_ID")
+    if ours is not None and holder == str(ours):
+        return
+    raise CacheRestoreContested(
+        f"refusing cache restore into {rundir_path}: its obj_dir is locked by "
+        f"run {holder!r} (this process is {ours!r}). If that run is dead, "
+        f"remove {lock} and retry."
+    )
+
+
 _STAGE_TOOL_ATTRS = {
     "synthesis": "syn_tool",
     "par": "par_tool",
@@ -173,6 +207,8 @@ def cache_or_run(
             log.warning(msg)
 
     if not is_cache_enabled(driver):
+        _info(f"PD cache disabled for {stage_tag} (set HAMMER_PD_CACHE=1 or "
+              f"vlsi.pd_cache.enabled to turn it on); running normally.")
         return run_fn()
 
     # Resolve the ledger switch once (honors env var + config key) and pass it
@@ -210,6 +246,10 @@ def cache_or_run(
     if blob is not None:
         _, data, original_duration, original_cpu = blob
         rundir_path = Path(rundir)
+        # Outside the try below on purpose: the generic except downgrades a
+        # failed restore to a local run, and a contested directory must fail
+        # the task instead.
+        _check_restore_allowed(rundir_path)
         try:
             rundir_path.parent.mkdir(parents=True, exist_ok=True)
             pd_store.untar_to_directory(data, rundir_path.parent)
@@ -413,6 +453,11 @@ def try_restore_from_cache(
 
     _, data, original_duration, original_cpu = blob
     rundir_path = Path(rundir)
+    # Same contested-directory refusal as the HIT path, before any extraction.
+    # This is the exact path that demolished a live par: the dep-skip branch
+    # found no local output json (a fresh in-flight run had cleared it) and
+    # restored the old blob over the running tool's rundir.
+    _check_restore_allowed(rundir_path)
     try:
         rundir_path.parent.mkdir(parents=True, exist_ok=True)
         pd_store.untar_to_directory(data, rundir_path.parent)

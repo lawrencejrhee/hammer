@@ -195,8 +195,45 @@ def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=N
 RUN_LOCK_NAME = ".sledgehammer-run.lock"
 
 
+class RunLockConflict(RuntimeError):
+    """Another run holds the obj_dir. Callers must not proceed into it.
+
+    Distinct from RuntimeError so the generated DAGs can tell a lock conflict
+    (fail the task) apart from resolver infrastructure trouble (fall back to
+    the baked OBJ_DIR). Falling back on a conflict is how one run bulldozes
+    another's rundirs.
+    """
+
+
 def _run_lock_path(obj_dir):
     return os.path.join(obj_dir, RUN_LOCK_NAME)
+
+
+def _dag_run_state(dag_id, run_id):
+    """The holder run's state per the Airflow metadata DB, or None if unknowable.
+
+    Uses the same metadata-conn resolution as the notify path (env, then the
+    SLEDGE_ file channel, then airflow.cfg) because Airflow 3 hands tasks a
+    decoy connection.
+    """
+    if not dag_id or not run_id:
+        return None
+    try:
+        import psycopg2
+        from hammer.vlsi import pd_store
+        settings = pd_store.airflow_metadata_conn_settings()
+        if not settings:
+            return None
+        with psycopg2.connect(**settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT state FROM dag_run WHERE dag_id = %s AND run_id = %s",
+                    (str(dag_id), str(run_id)))
+                row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"[run-lock] holder liveness lookup failed: {e}")
+        return None
 
 
 def claim_obj_dir(obj_dir, dag_id, run_id, user):
@@ -209,8 +246,10 @@ def claim_obj_dir(obj_dir, dag_id, run_id, user):
     the same time, trigger with conf={"workspace": "<name>"} so it resolves
     somewhere else.
 
-    A lock left by a run that died is not reclaimed automatically; the error
-    names the file so it can be removed deliberately.
+    A lock whose holder the metadata DB says is finished (success/failed) is
+    stale and gets taken over. When the holder is live, or its state cannot
+    be determined, the claim refuses: a spurious refusal costs one manual
+    `rm`, a spurious takeover costs someone hours of tool time.
     """
     if not obj_dir or not run_id:
         return
@@ -220,30 +259,41 @@ def claim_obj_dir(obj_dir, dag_id, run_id, user):
         "pid": os.getpid(), "claimed": datetime.datetime.now().isoformat(timespec="seconds"),
     })
     os.makedirs(obj_dir, exist_ok=True)
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    except FileExistsError:
-        pass
-    else:
-        with os.fdopen(fd, "w") as f:
-            f.write(payload)
-        return
+    for attempt in (1, 2):
+        try:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "w") as f:
+                f.write(payload)
+            return
 
-    try:
-        with open(lock) as f:
-            held = json.load(f)
-    except (OSError, ValueError):
-        held = {}
-    if str(held.get("run_id")) == str(run_id):
-        return
-    raise RuntimeError(
-        f"Error: run already in progress in {obj_dir}.\n"
-        f"  held by run {held.get('run_id')!r} (dag {held.get('dag_id')!r}, "
-        f"user {held.get('user')!r}, claimed {held.get('claimed')!r})\n"
-        f"  To run a second iteration at the same time, trigger with "
-        f'conf={{"workspace": "<name>"}}.\n'
-        f"  If that run is gone, remove {lock}"
-    )
+        try:
+            with open(lock) as f:
+                held = json.load(f)
+        except (OSError, ValueError):
+            held = {}
+        if str(held.get("run_id")) == str(run_id):
+            return
+        state = _dag_run_state(held.get("dag_id"), held.get("run_id"))
+        if attempt == 1 and state in ("success", "failed"):
+            print(f"[run-lock] holder {held.get('run_id')!r} is terminal "
+                  f"({state}); taking over the stale lock.")
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
+            continue
+        raise RunLockConflict(
+            f"Error: run already in progress in {obj_dir}.\n"
+            f"  held by run {held.get('run_id')!r} (dag {held.get('dag_id')!r}, "
+            f"user {held.get('user')!r}, claimed {held.get('claimed')!r}, "
+            f"state {state or 'unknown'})\n"
+            f"  To run a second iteration at the same time, trigger with "
+            f'conf={{"workspace": "<name>"}}.\n'
+            f"  If that run is gone, remove {lock}"
+        )
 
 
 def release_obj_dir(obj_dir, run_id):

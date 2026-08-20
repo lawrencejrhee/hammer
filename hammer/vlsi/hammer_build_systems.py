@@ -730,6 +730,12 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                     if resolved:
                         obj_dir = resolved
                 except Exception as e:
+                    # A lock conflict means another live run owns the build dir.
+                    # Falling back to the baked OBJ_DIR here would walk straight
+                    # into that directory and demolish the other run's work, so
+                    # only resolver-infrastructure trouble may fall through.
+                    if type(e).__name__ == "RunLockConflict":
+                        raise
                     print(f"[workspace] resolver unavailable ({{e}}); using gen-time OBJ_DIR")
 
             # Redirect any gen-time OBJ_DIR-prefixed paths to the per-user workspace.
@@ -1326,7 +1332,13 @@ def hammer_dag():
     mod_tg, _ = create_module_pipeline('{top_module}', '', paths_{top_module})
     start_node >> mod_tg >> exit_node
     mod_tg >> summary_node >> exit_node
-    exit_node >> notify_node
+    # notify_ hangs off summary_node as well as exit_node on purpose. exit_ is
+    # NONE_FAILED, so Airflow marks it upstream_failed the moment any one stage
+    # fails, without waiting for the others -- hanging notify_ off it alone
+    # sends the completion mail while later stages are still running.
+    # summary_node is ALL_DONE behind the whole module group, so it is the one
+    # that genuinely waits for everything.
+    [summary_node, exit_node] >> notify_node
 """
     else:
         output += "    pipelines = {}\n"
@@ -1423,7 +1435,7 @@ def hammer_dag():
         output += "    exit_drivers >> exit_node\n"
         output += "    exit_drivers >> summary_node\n"
         output += "    summary_node >> exit_node\n"
-        output += "    exit_node >> notify_node\n"
+        output += "    [summary_node, exit_node] >> notify_node\n"
 
     output += "\ndag_instance = hammer_dag()\n"
 
