@@ -156,6 +156,87 @@ def _parse_target(word):
     return None
 
 
+# Well-known places a stack environment file may live, tried in order.
+STACK_ENV_HOME = os.path.expanduser("~/.sledgehammer/env.sh")
+
+
+def _find_stack_env():
+    """The shell file that configures this stack, or None.
+
+    Order: $SLEDGE_ENV_FILE, ~/.sledgehammer/env.sh, then a stack_env.sh found
+    by walking up from the current directory. The last one means a workspace
+    can carry its own stack without anyone configuring anything.
+    """
+    cand = os.environ.get("SLEDGE_ENV_FILE")
+    if cand and os.path.isfile(cand):
+        return cand
+    if os.path.isfile(STACK_ENV_HOME):
+        return STACK_ENV_HOME
+    d = os.path.abspath(os.getcwd())
+    while True:
+        f = os.path.join(d, "stack_env.sh")
+        if os.path.isfile(f):
+            return f
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def _load_stack_env():
+    """Source the stack env file into this process, if one is found.
+
+    Makes `sledgehammer par -t Top` work in a bare shell: the CLI configures
+    itself instead of requiring `source stack_env.sh` first. Values already in
+    the environment win, so an explicit export always beats the file. A no-op
+    when the stack is already configured or no file exists.
+    """
+    if os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN") and \
+            os.environ.get("HAMMER_PG_HOST"):
+        return None
+    f = _find_stack_env()
+    if not f:
+        return None
+    try:
+        # run the file in a shell and diff the environment it produces
+        res = subprocess.run(
+            ["bash", "-c", f'set -a; source "{f}" >/dev/null 2>&1; env -0'],
+            capture_output=True, timeout=60)
+        if res.returncode != 0:
+            return None
+        for chunk in res.stdout.split(b"\0"):
+            if not chunk or b"=" not in chunk:
+                continue
+            k, v = chunk.decode("utf-8", "ignore").split("=", 1)
+            # never override what the caller set explicitly
+            if k and k not in os.environ:
+                os.environ[k] = v
+    except Exception:
+        return None
+    return f
+
+
+def _dags_folder():
+    """Where registered DAGs live, and how we knew.
+
+    Priority: HAMMER_DAGS_FOLDER, then Airflow's own configured dags_folder
+    (authoritative -- it is what the scheduler actually reads), then
+    $AIRFLOW_HOME/dags. Asking Airflow mirrors how --obj_dir asks the
+    Makefile: consult the tool that owns the answer rather than guessing.
+    """
+    env = os.environ.get("HAMMER_DAGS_FOLDER")
+    if env:
+        return env, "$HAMMER_DAGS_FOLDER"
+    try:
+        rc, out, _ = _airflow("config", "get-value", "core", "dags_folder")
+        got = (out or "").strip().splitlines()
+        if rc == 0 and got and got[-1].strip():
+            return got[-1].strip(), "airflow config"
+    except Exception:
+        pass
+    return os.path.join(os.environ.get("AIRFLOW_HOME", REPO), "dags"), "$AIRFLOW_HOME/dags"
+
+
 def _dag_obj_dir(dag_file):
     """OBJ_DIR baked into a generated DAG, or None."""
     try:
@@ -263,8 +344,7 @@ def _cmd_run(args) -> int:
                  f"Valid: {', '.join(_STAGES)}")
 
     user = getpass.getuser()
-    dags_folder = os.environ.get("HAMMER_DAGS_FOLDER") \
-        or os.path.join(os.environ["AIRFLOW_HOME"], "dags")
+    dags_folder, dags_src = _dags_folder()
 
     # A registered DAG already carries its OBJ_DIR and design, baked in when it
     # was generated -- running one needs no Makefile and no working directory.
@@ -295,8 +375,10 @@ def _cmd_run(args) -> int:
 
     if a.regen or not os.path.exists(dag_file):
         if not a.project_config:
-            sys.exit(f"[sledgehammer] no DAG registered as {dag_file} -- pass "
-                     f"-e/-p so it can be generated (hammer build).")
+            sys.exit(f"[sledgehammer] no DAG registered as {dag_file}\n"
+                     f"  (dags folder from {dags_src})\n"
+                     f"  Pass -e/-p to generate it, or set HAMMER_DAGS_FOLDER "
+                     f"if your DAGs live elsewhere.")
         # hammer's own build action with the sledgehammer build system emits
         # hammer_dag.py into obj_dir and registers it under HAMMER_DAGS_FOLDER.
         with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
@@ -411,6 +493,9 @@ def main() -> int:
     # Flow commands compose with an existing stack (stack_env, iris-db, ...):
     # respect AIRFLOW_HOME when the caller set one, default to the checkout.
     if sub in ("run", "status", "runs"):
+        loaded = _load_stack_env()
+        if loaded:
+            print(f"[sledgehammer] stack env from {loaded}")
         os.environ.setdefault("AIRFLOW_HOME", REPO)
         _load_secrets()
         if sub == "run":
@@ -423,6 +508,9 @@ def main() -> int:
         parsed = _parse_target(sub)
         if parsed:
             stage, module, redo = parsed
+            loaded = _load_stack_env()
+            if loaded:
+                print(f"[sledgehammer] stack env from {loaded}")
             os.environ.setdefault("AIRFLOW_HOME", REPO)
             _load_secrets()
             fwd = [stage]
