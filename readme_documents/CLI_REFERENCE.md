@@ -17,6 +17,82 @@ step in a normal flow that requires it.
 | `hammer-shell-test` | Shell-integration smoke test |
 | `readlink-array`, `yaml2json`, `asap7_gds_scale` | Small utilities |
 
+
+## Getting set up
+
+From a fresh clone, one command builds the environment:
+
+```bash
+./scripts/uv_setup.sh
+```
+
+It neutralizes conda/mamba/any active venv first (psycopg2 and python-ldap
+compile from source, and a foreign OpenSSL on the linker path gets baked in as
+an RPATH that breaks them in every later shell), creates the venv, runs
+`uv sync --group dev`, then installs Airflow and its fab/edge3 providers
+against the official constraint file and builds psycopg2 and python-ldap with
+`--no-binary`.
+
+**Do not run `uv sync` on its own afterwards.** Airflow is installed outside
+the lock, so a bare sync uninstalls it. To refresh just this package:
+
+```bash
+uv pip install -e . --no-deps
+```
+
+Then a database and the schema -- [DATABASE_SETUP.md](DATABASE_SETUP.md) for an
+existing Postgres, [LOCAL_POSTGRES_SETUP.md](LOCAL_POSTGRES_SETUP.md) to stand
+one up yourself:
+
+```bash
+source venv.sh && studio init && airflow db migrate
+```
+
+### The environment file
+
+Write the stack's settings once to `~/.sledgehammer/env.sh` and nothing needs
+sourcing again -- the CLI reads it itself:
+
+```bash
+mkdir -p ~/.sledgehammer
+ln -s /path/to/your/stack_env.sh ~/.sledgehammer/env.sh
+```
+
+Discovery order, first hit wins: `$SLEDGE_ENV_FILE`, `~/.sledgehammer/env.sh`,
+then a `stack_env.sh` found by walking up from the current directory (so a
+workspace can carry its own stack). Anything already exported beats the file.
+
+That file should set `AIRFLOW_HOME`, `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`,
+`AIRFLOW__CORE__DAGS_FOLDER`, `HAMMER_PD_CACHE=1`, and the `HAMMER_PG_*`
+connection variables. See LOCAL_POSTGRES_SETUP.md for a complete example.
+
+### Running a design
+
+Legacy generated the per-stage targets first, then ran them:
+
+```bash
+cd rocket-vlsi
+make buildfile        # hammer build -> hammer.d
+make syn
+make par
+```
+
+SledgeHammer folds the generate into the first run:
+
+```bash
+cd rocket-vlsi
+sledgehammer syn      # generates and registers the DAG if there is none
+sledgehammer par
+```
+
+Both read `OBJ_DIR` from the Makefile, so no flags are needed inside a
+workspace. `make buildfile` still works and registers the DAG too -- the same
+`build` action emits the Makefile include and the DAG.
+
+The one prerequisite `make` does not have: the Airflow stack must be running
+(api-server, scheduler, dag-processor, triggerer). It is a service you start
+once per machine, not per run.
+
 ## sledgehammer
 
 ### Running flows (no GUI)
