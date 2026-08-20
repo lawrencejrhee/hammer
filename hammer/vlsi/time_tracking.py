@@ -775,18 +775,18 @@ def _airflow_task_windows(run_ids: List[str]) -> Dict[str, List[Tuple[float, flo
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT run_id, start_date, end_date FROM task_instance "
+                    "SELECT run_id, task_id, start_date, end_date FROM task_instance "
                     "WHERE run_id = ANY(%s) AND state IN ('success', 'failed') "
                     "AND start_date IS NOT NULL AND end_date IS NOT NULL "
                     "AND EXTRACT(EPOCH FROM (end_date - start_date)) >= 60",
                     (list(run_ids),))
-                for run_id, start, end in cur.fetchall():
+                for run_id, task_id, start, end in cur.fetchall():
                     key = (run_id, start.timestamp(), end.timestamp())
                     if key in seen:
                         continue
                     seen.add(key)
                     out.setdefault(run_id, []).append(
-                        (start.timestamp(), end.timestamp()))
+                        (start.timestamp(), end.timestamp(), task_id))
         except Exception:
             pass
         finally:
@@ -826,8 +826,13 @@ def parallel_savings(events: List[Dict[str, Any]],
         # Airflow's task windows cover every stage; the ledger only covers
         # the cached ones, so prefer the former and keep the latter as the
         # fallback for runs the metadata DB no longer has.
-        for start, end in task_windows.get(run_key, []):
-            windows.append((start, end, evs[0]))
+        for start, end, task_id in task_windows.get(run_key, []):
+            # attribution info: the module is in the task name
+            # (module_<name>.<stage>); fall back to the run's first event.
+            ev = dict(evs[0])
+            if task_id.startswith("module_"):
+                ev["module"] = task_id[len("module_"):].split(".")[0]
+            windows.append((start, end, ev))
         if len(windows) < 2:
             windows = []
             for ev in evs:
@@ -938,6 +943,68 @@ def savings_csv(events: List[Dict[str, Any]], group_by: str = "project") -> str:
     return "\n".join(lines) + "\n"
 
 
+def airflow_failed_time() -> Optional[float]:
+    """Wall-clock seconds burned by FAILED module tasks, from Airflow.
+
+    The ledger records completed stages only -- a par that dies at hour three
+    writes nothing -- so "time that actually ran" is productive tool time.
+    This measures the failures from the metadata DBs (primary plus
+    SLEDGE_EXTRA_METADATA_CONNS), deduped like the parallel-savings windows.
+    Returns None when no metadata DB is reachable.
+    """
+    import os
+    try:
+        import psycopg2
+        from hammer.vlsi import pd_store
+    except Exception:
+        return None
+    sources = []
+    try:
+        primary = pd_store.airflow_metadata_conn_settings()
+        if primary:
+            sources.append(primary)
+    except Exception:
+        pass
+    for uri in (os.environ.get("SLEDGE_EXTRA_METADATA_CONNS") or "").split(","):
+        uri = uri.strip()
+        if uri:
+            try:
+                sources.append(pd_store._parse_conn_uri(uri))
+            except Exception:
+                pass
+    if not sources:
+        return None
+    seen: set = set()
+    total = 0.0
+    got_any = False
+    for settings in sources:
+        try:
+            conn = psycopg2.connect(connect_timeout=20, **settings)
+        except Exception:
+            continue
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT run_id, task_id, "
+                    "EXTRACT(EPOCH FROM (end_date - start_date)) "
+                    "FROM task_instance WHERE state = 'failed' "
+                    "AND task_id LIKE 'module%%' "
+                    "AND start_date IS NOT NULL AND end_date IS NOT NULL "
+                    "AND EXTRACT(EPOCH FROM (end_date - start_date)) >= 60")
+                for run_id, task_id, sec in cur.fetchall():
+                    key = (run_id, task_id, round(sec))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    total += float(sec)
+            got_any = True
+        except Exception:
+            pass
+        finally:
+            conn.close()
+    return total if got_any else None
+
+
 def format_savings_report(events: List[Dict[str, Any]],
                           group_by: str = "stage",
                           source: str = "") -> str:
@@ -1003,6 +1070,10 @@ def format_savings_report(events: List[Dict[str, Any]],
     lines.append(f"  Legacy-equivalent skips (no credit): {_pair(t['deplegacy_wall'], t['deplegacy_cpu'])}")
     lines.append(f"  Total skipped work (incl. legacy):  {_pair(total_saved_wall, total_saved_cpu)}")
     lines.append(f"  Time that actually ran:             {_pair(t['ran_wall'], t['ran_cpu'])}")
+    failed_s = airflow_failed_time()
+    if failed_s:
+        lines.append(f"  Failed-run time (not in any bucket): wall {_format_duration(failed_s)}"
+                     f"  (from airflow; legacy would burn these failures too)")
     # Turnaround-time efficiency: the share of the legacy-equivalent schedule
     # that sledgehammer removed. The baseline excludes skips legacy would have
     # made anyway, so only sledgehammer-specific savings count.

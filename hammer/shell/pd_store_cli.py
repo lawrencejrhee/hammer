@@ -1255,7 +1255,10 @@ def _cmd_cache_events_clear(args: argparse.Namespace) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="studio",
-        description="Postgres PD artifact store (POC).",
+        description="SledgeHammer Studio: the admin CLI for the shared PD "
+                    "database -- stage cache and blobs, checkpoints, the "
+                    "time-saved ledger, users and access, workspaces, and "
+                    "flow-completion notifications.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1459,12 +1462,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "smtp-setup",
         help="Configure the SMTP sender for completion emails (writes ~/.sledgehammer/smtp.env).",
     )
-    p_ss.add_argument("--user", required=True, help="SMTP account / sender address.")
+    p_ss.add_argument("--user", default="berkeley.sledgehammer.studio@gmail.com",
+                      help="SMTP account / sender address "
+                           "(default: the studio service account).")
     p_ss.add_argument("--host", default="smtp.gmail.com", help="SMTP host (default: smtp.gmail.com).")
     p_ss.add_argument("--port", default="587", help="SMTP port (default: 587).")
     p_ss.add_argument("--sender", help="From address if different from --user.")
     p_ss.add_argument("--password-file",
                       help="Existing password file to reference instead of prompting.")
+    p_ss.add_argument("--password-stdin", action="store_true",
+                      help="Read the password from stdin instead of prompting.")
     p_ss.set_defaults(func=_cmd_smtp_setup)
 
     p_nt = sub.add_parser(
@@ -1817,9 +1824,16 @@ def _cmd_smtp_setup(args: argparse.Namespace) -> int:
 
     pw_file = args.password_file
     if not pw_file:
-        pw = getpass.getpass(f"SMTP password for {args.user} (input hidden): ")
+        if args.password_stdin:
+            pw = sys.stdin.readline().strip()
+        else:
+            print(f"Enter the SMTP password for {args.user} at the prompt below.")
+            print("(input is hidden -- type or paste it, then press Enter)")
+            pw = getpass.getpass("SMTP password: ")
         if not pw:
-            print("empty password; aborting", file=sys.stderr)
+            print("ERROR: empty password given; nothing written. Re-run and "
+                  "type the app password at the prompt, or pipe it in with "
+                  "--password-stdin.", file=sys.stderr)
             return 2
         pw_file = os.path.join(envd, ".smtp_password")
         fd = os.open(pw_file, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)

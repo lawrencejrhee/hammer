@@ -12,11 +12,32 @@ CLI, with the database secrets and AIRFLOW_HOME loaded first, so commands like
   sledgehammer dags list       (any airflow subcommand works)
   SLEDGE_2FA=0 sledgehammer    launch without the second factor (plain LDAP)
 
+Flow commands -- hammer's flags, the DAG as plumbing, no GUI required:
+
+  sledgehammer run syn par -e env.yml -p design.yml --obj_dir build/Top
+      Generate the DAG if it is missing (hammer build with the sledgehammer
+      build system), register it, trigger the selected stages, and stream
+      task states to the terminal until the run finishes. Exit code follows
+      the run, so it drops into a Makefile exactly where hammer-vlsi did.
+  sledgehammer run drc lvs --obj_dir build/Top
+      Reuse the registered DAG; -e/-p only needed when (re)generating.
+  sledgehammer run syn --obj_dir build/Top --no-wait
+      Trigger and return immediately (prints the run id).
+  cd vlsi && sledgehammer par-RocketTile
+      The Makefile target names work verbatim: <stage>, <stage>-<module>,
+      and redo-<stage>[-<module>]. Run from the vlsi directory and
+      --obj_dir is inferred from the Makefile, exactly as make did.
+
+  sledgehammer status --design Top          latest run, per-task table
+  sledgehammer runs --design Top            recent runs
+
 Set SLEDGE_DRYRUN=1 to print what it would run instead of running it.
 """
+import json
 import os
 import subprocess
 import sys
+import time
 
 # hammer/shell/sledgehammer_cli.py -> repo root is three levels up.
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -75,12 +96,350 @@ def _load_secrets() -> None:
         os.environ[key] = val
 
 
+# The stage names the generated DAGs accept as trigger-conf booleans.
+_STAGES = ("sim_rtl", "power_rtl", "syn", "sim_syn", "timing_syn", "formal_syn",
+           "power_syn", "par", "sim_par", "timing_par", "formal_par",
+           "power_par", "drc", "lvs")
+
+
+def _airflow(*a, capture=True):
+    r = subprocess.run([_venv_bin("airflow"), *a],
+                       capture_output=capture, text=True)
+    return r.returncode, (r.stdout or ""), (r.stderr or "")
+
+
+def _run_state(dag_id, run_id):
+    _, out, _ = _airflow("dags", "list-runs", dag_id, "-o", "plain")
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == run_id:
+            return parts[2]
+    return None
+
+
+def _task_states(dag_id, run_id):
+    _, out, _ = _airflow("tasks", "states-for-dag-run", dag_id, run_id, "-o", "json")
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        return {}
+    return {r.get("task_id", ""): (r.get("state") or "")
+            for r in rows if r.get("task_id")}
+
+
+# Legacy make targets, in dash form, longest first so "formal-par" wins over "par".
+_TARGET_STAGES = sorted(
+    [st.replace("_", "-") for st in _STAGES], key=len, reverse=True)
+
+
+def _parse_target(word):
+    """Split a legacy make target into (stage, module, redo).
+
+    Accepts what `make` accepted for a hierarchical flow -- `syn`,
+    `par-RocketTile`, `redo-formal-syn-ScratchpadBank_1` -- so muscle memory
+    from the Makefile carries over unchanged. Returns None when the word is
+    not a target, in which case the caller falls through to the airflow
+    passthrough.
+    """
+    redo = False
+    w = word
+    if w.startswith("redo-"):
+        redo, w = True, w[len("redo-"):]
+    for st in _TARGET_STAGES:
+        if w == st:
+            return st.replace("-", "_"), None, redo
+        if w.startswith(st + "-"):
+            mod = w[len(st) + 1:]
+            # a module name, not another stage fragment
+            if mod and not mod.startswith("to-"):
+                return st.replace("-", "_"), mod, redo
+    return None
+
+
+def _dag_obj_dir(dag_file):
+    """OBJ_DIR baked into a generated DAG, or None."""
+    try:
+        with open(dag_file) as f:
+            for line in f:
+                if line.startswith("OBJ_DIR"):
+                    return line.split("=", 1)[1].strip().strip("\"'")
+    except OSError:
+        return None
+    return None
+
+
+def _dag_for_cwd(dags_folder, user):
+    """(design, obj_dir) for a registered DAG whose OBJ_DIR is under the cwd.
+
+    Lets `cd vlsi && sledgehammer par` find its own DAG with no flags and no
+    Makefile: the DAG that builds into this tree is the one meant.
+    """
+    here = os.path.abspath(os.getcwd())
+    hits = []
+    try:
+        names = os.listdir(dags_folder)
+    except OSError:
+        return None
+    for fn in names:
+        if not (fn.startswith("sledgehammer_") and fn.endswith(f"_{user}.py")):
+            continue
+        od = _dag_obj_dir(os.path.join(dags_folder, fn))
+        if od and (os.path.abspath(od) + os.sep).startswith(here + os.sep):
+            hits.append((fn[len("sledgehammer_"):-len(f"_{user}.py")], od))
+    return hits[0] if len(hits) == 1 else None
+
+
+def _infer_obj_dir():
+    """Where `make` would have put this build, so --obj_dir is optional.
+
+    Legacy flows ran `cd vlsi && make par` and the Makefile supplied OBJ_DIR.
+    Ask the Makefile the same question rather than guessing: --eval defines a
+    throwaway target that echoes the variable, so whatever logic the project
+    uses (VLSI_TOP, SETUP=dryrun, overrides on the command line) is honored.
+    Falls back to $OBJ_DIR, then to build/<x> when that is unambiguous.
+    """
+    if os.environ.get("OBJ_DIR"):
+        return os.environ["OBJ_DIR"], "$OBJ_DIR"
+    if os.path.exists("Makefile"):
+        try:
+            r = subprocess.run(
+                ["make", "--eval=__sledge_p:;@echo $(OBJ_DIR)", "__sledge_p"],
+                capture_output=True, text=True, timeout=60)
+            got = (r.stdout or "").strip().splitlines()
+            if r.returncode == 0 and got and got[-1].strip():
+                return got[-1].strip(), "Makefile"
+        except Exception:
+            pass
+    if os.path.isdir("build"):
+        subs = [d for d in sorted(os.listdir("build"))
+                if os.path.isdir(os.path.join("build", d))]
+        if len(subs) == 1:
+            return os.path.abspath(os.path.join("build", subs[0])), "build/"
+    return None, None
+
+
+def _cmd_run(args) -> int:
+    import argparse
+    import getpass
+    import tempfile
+    p = argparse.ArgumentParser(
+        prog="sledgehammer run",
+        description="Run flow stages through the DAG with hammer's flags.")
+    p.add_argument("actions", nargs="+",
+                   help=f"stages to run: {', '.join(_STAGES)} (dashes ok)")
+    p.add_argument("-e", "--environment_config", action="append", default=[])
+    p.add_argument("-p", "--project_config", action="append", default=[])
+    p.add_argument("--obj_dir", help="build directory; taken from the "
+                   "registered DAG, or $OBJ_DIR / the Makefile, when omitted")
+    # hammer spells the design's top module -t/--top; --design is our alias
+    p.add_argument("-t", "--top", "--design", dest="top",
+                   help="top module / design name (default: obj_dir basename)")
+    p.add_argument("--module", action="append", default=[],
+                   help="restrict to these modules (hierarchical flows)")
+    # hammer's --force; --redo is the DAG conf key and stays as an alias
+    p.add_argument("--force", "--redo", dest="force", action="store_true",
+                   help="rerun even if the dependency check finds no changes")
+    p.add_argument("--local", action="store_true",
+                   help="do not pull cached results from the PD store")
+    p.add_argument("--workspace")
+    p.add_argument("--project")
+    p.add_argument("--start_before_step", "--from_step", "--from-step",
+                   dest="from_step")
+    p.add_argument("--stop_after_step", "--to_step", "--to-step", dest="to_step")
+    p.add_argument("--only_step", "--only-step", dest="only_step")
+    p.add_argument("--steps_stage", "--steps-stage", dest="steps_stage",
+                   choices=["syn", "par"], default="syn")
+    p.add_argument("--run-id")
+    p.add_argument("--regen", action="store_true",
+                   help="regenerate the DAG even if one is registered")
+    p.add_argument("--no-wait", action="store_true",
+                   help="trigger and return; do not stream the run")
+    a = p.parse_args(args)
+
+    actions = [x.replace("-", "_") for x in a.actions]
+    bad = [x for x in actions if x not in _STAGES]
+    if bad:
+        sys.exit(f"[sledgehammer] unknown stage(s): {', '.join(bad)}. "
+                 f"Valid: {', '.join(_STAGES)}")
+
+    user = getpass.getuser()
+    dags_folder = os.environ.get("HAMMER_DAGS_FOLDER") \
+        or os.path.join(os.environ["AIRFLOW_HOME"], "dags")
+
+    # A registered DAG already carries its OBJ_DIR and design, baked in when it
+    # was generated -- running one needs no Makefile and no working directory.
+    # Explicit flags win; the Makefile is only consulted when there is nothing
+    # registered yet and we are about to generate.
+    obj_dir = os.path.abspath(a.obj_dir) if a.obj_dir else None
+    design = a.top
+    if design and not obj_dir:
+        got = _dag_obj_dir(os.path.join(dags_folder, f"sledgehammer_{design}_{user}.py"))
+        if got:
+            obj_dir, src = got, "the registered DAG"
+    if not obj_dir:
+        hit = _dag_for_cwd(dags_folder, user)
+        if hit:
+            design, obj_dir, src = hit[0], hit[1], "the registered DAG"
+    if not obj_dir:
+        obj_dir, src = _infer_obj_dir()
+        if not obj_dir:
+            sys.exit("[sledgehammer] could not work out obj_dir. Pass "
+                     "--obj_dir, or -t <top> for a DAG that is already "
+                     "registered, or run from the vlsi directory.")
+        obj_dir = os.path.abspath(obj_dir)
+    if not a.obj_dir:
+        print(f"[sledgehammer] obj_dir from {src}: {obj_dir}")
+    design = design or os.path.basename(obj_dir.rstrip("/"))
+    dag_id = f"sledgehammer_{design}_{user}"
+    dag_file = os.path.join(dags_folder, f"{dag_id}.py")
+
+    if a.regen or not os.path.exists(dag_file):
+        if not a.project_config:
+            sys.exit(f"[sledgehammer] no DAG registered as {dag_file} -- pass "
+                     f"-e/-p so it can be generated (hammer build).")
+        # hammer's own build action with the sledgehammer build system emits
+        # hammer_dag.py into obj_dir and registers it under HAMMER_DAGS_FOLDER.
+        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
+            f.write("vlsi.core.build_system: sledgehammer\n")
+            overlay = f.name
+        cmd = [_venv_bin("hammer-vlsi")]
+        for e in a.environment_config:
+            cmd += ["-e", e]
+        for c in a.project_config:
+            cmd += ["-p", c]
+        cmd += ["-p", overlay, "--obj_dir", obj_dir, "build"]
+        env = dict(os.environ, HAMMER_DAGS_FOLDER=dags_folder)
+        print(f"[sledgehammer] generating DAG for {design} ...")
+        if subprocess.run(cmd, env=env).returncode != 0:
+            sys.exit("[sledgehammer] DAG generation failed")
+        _airflow("dags", "reserialize", capture=True)
+        for _ in range(30):
+            rc, out, _ = _airflow("dags", "list", "-o", "plain")
+            if dag_id in out:
+                break
+            time.sleep(10)
+
+    _airflow("dags", "unpause", dag_id)
+    conf = {s: True for s in actions}
+    if a.module:
+        conf["modules"] = a.module
+    if a.force:
+        conf["redo"] = True
+    if a.local:
+        conf["local"] = True
+    if a.workspace:
+        conf["workspace"] = a.workspace
+    if a.project:
+        conf["project"] = a.project
+    for k, v in (("from_step", a.from_step), ("to_step", a.to_step),
+                 ("only_step", a.only_step)):
+        if v:
+            conf[k] = v
+            conf["steps_stage"] = a.steps_stage
+    run_id = a.run_id or f"cli_{int(time.time())}"
+    rc, _, err = _airflow("dags", "trigger", dag_id, "-r", run_id,
+                          "-c", json.dumps(conf))
+    if rc != 0:
+        sys.stderr.write(err)
+        sys.exit("[sledgehammer] trigger failed")
+    print(f"[sledgehammer] {dag_id} run {run_id} triggered: "
+          f"{' '.join(actions)}")
+    if a.no_wait:
+        return 0
+
+    print("[sledgehammer] streaming (Ctrl-C detaches; the run keeps going)")
+    last = {}
+    try:
+        while True:
+            for t, s in sorted(_task_states(dag_id, run_id).items()):
+                if not s or s == "skipped" or last.get(t) == s:
+                    continue
+                if t.startswith("module_") or t in ("notify_",):
+                    print(f"  [{time.strftime('%H:%M')}] "
+                          f"{t.replace('module_', ''):42s} {s}")
+                last[t] = s
+            state = _run_state(dag_id, run_id)
+            if state in ("success", "failed"):
+                print(f"[sledgehammer] run {run_id}: {state.upper()}")
+                return 0 if state == "success" else 1
+            time.sleep(30)
+    except KeyboardInterrupt:
+        print(f"\n[sledgehammer] detached; check later with: "
+              f"sledgehammer status --design {design}")
+        return 0
+
+
+def _cmd_status(args, list_only=False) -> int:
+    import argparse
+    import getpass
+    p = argparse.ArgumentParser(prog="sledgehammer status")
+    p.add_argument("--design")
+    p.add_argument("--run-id")
+    p.add_argument("-n", type=int, default=8)
+    a = p.parse_args(args)
+    user = getpass.getuser()
+    if a.design:
+        dag_ids = [f"sledgehammer_{a.design}_{user}"]
+    else:
+        _, out, _ = _airflow("dags", "list", "-o", "plain")
+        dag_ids = [l.split()[0] for l in out.splitlines()
+                   if l.startswith("sledgehammer_") and user in l]
+    for dag_id in dag_ids:
+        _, out, _ = _airflow("dags", "list-runs", dag_id, "-o", "plain")
+        rows = [l.split() for l in out.splitlines()[1:] if l.split()]
+        rows = [r for r in rows if len(r) >= 3][:a.n]
+        if not rows:
+            continue
+        if list_only:
+            for r in rows:
+                print(f"  {dag_id.replace('sledgehammer_', '').replace('_' + user, ''):18s} "
+                      f"{r[1]:44s} {r[2]}")
+            continue
+        rid = a.run_id or rows[0][1]
+        state = next((r[2] for r in rows if r[1] == rid), "?")
+        print(f"{dag_id}  run {rid}: {state}")
+        for t, s in sorted(_task_states(dag_id, rid).items()):
+            if s and s != "skipped" and (t.startswith("module_") or t == "notify_"):
+                print(f"  {t.replace('module_', ''):44s} {s}")
+    return 0
+
+
 def main() -> int:
+    args = sys.argv[1:]
+    sub = args[0] if args else ""
+
+    # Flow commands compose with an existing stack (stack_env, iris-db, ...):
+    # respect AIRFLOW_HOME when the caller set one, default to the checkout.
+    if sub in ("run", "status", "runs"):
+        os.environ.setdefault("AIRFLOW_HOME", REPO)
+        _load_secrets()
+        if sub == "run":
+            return _cmd_run(args[1:])
+        return _cmd_status(args[1:], list_only=(sub == "runs"))
+
+    # Legacy make-target spelling: `sledgehammer par-RocketTile` is the same
+    # request as `make par-RocketTile` was, and runs through the DAG.
+    if sub and sub not in HELP_WORDS:
+        parsed = _parse_target(sub)
+        if parsed:
+            stage, module, redo = parsed
+            os.environ.setdefault("AIRFLOW_HOME", REPO)
+            _load_secrets()
+            fwd = [stage]
+            if module:
+                fwd += ["--module", module]
+            if redo:
+                fwd += ["--redo"]
+            return _cmd_run(fwd + args[1:])
+        if sub.startswith("hier-par-to-syn-"):
+            print("[sledgehammer] the leaf-to-top bridge is a DAG edge -- it "
+                  "runs automatically. Just ask for the top-level stage, e.g."
+                  f"\n  sledgehammer par --obj_dir <obj_dir>")
+            return 0
+
     # Pin AIRFLOW_HOME so the checkout's airflow.cfg + webserver_config.py are
     # read (not the ~/airflow defaults that would drop LDAP and use port 8080).
     os.environ["AIRFLOW_HOME"] = REPO
-    args = sys.argv[1:]
-    sub = args[0] if args else ""
 
     if sub in HELP_WORDS:
         sys.stdout.write(__doc__)
