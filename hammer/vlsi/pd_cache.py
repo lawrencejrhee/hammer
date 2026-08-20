@@ -124,6 +124,65 @@ def _check_restore_allowed(rundir_path: Path) -> None:
     )
 
 
+# Stages whose sub-step checkpoints stream to the database while the tool
+# runs, and the tool log the confirmation parser reads for each.
+_STREAM_LOGS = {"synthesis": "genus.log", "par": "innovus.log"}
+
+
+def _run_with_checkpoint_stream(driver, stage_tag, rundir, run_fn):
+    """Run the stage while pushing each tool-confirmed checkpoint to the DB.
+
+    The failure-path push (cli_driver -> substep_resume.push_checkpoint_db)
+    only fires when Python survives the failure, and only if the rundir still
+    exists. Streaming during the run means a SIGKILL, OOM, node crash, or a
+    demolished rundir loses at most one push interval of progress instead of
+    all of it. Every push is the same trusted path the failure push uses
+    (log-confirmed, key-matched, ceiling-clamped), deduped by step so a quiet
+    tool costs one file scan per interval. Any trouble in the streamer is
+    swallowed: it must never affect the run itself.
+    """
+    log_name = _STREAM_LOGS.get(stage_tag)
+    if log_name is None:
+        return run_fn()
+    if os.environ.get("HAMMER_CHECKPOINT_STREAM", "1") in ("0", "false", "no"):
+        return run_fn()
+    try:
+        from hammer.vlsi import substep_resume
+        if not (substep_resume.is_enabled(driver) and substep_resume._db_enabled(driver)):
+            return run_fn()
+    except Exception:
+        return run_fn()
+
+    import threading
+    stop = threading.Event()
+    try:
+        interval = float(os.environ.get("HAMMER_CHECKPOINT_STREAM_SECS", "300"))
+    except ValueError:
+        interval = 300.0
+    module = _stage_module(driver, stage_tag)
+
+    def _loop():
+        last = None
+        while not stop.wait(interval):
+            try:
+                confirmed = substep_resume.confirmed_checkpoints(rundir, log_name)
+                if confirmed and confirmed[-1] != last:
+                    pushed = substep_resume.push_checkpoint_db(
+                        driver, stage_tag, rundir, log_name, module=module)
+                    if pushed:
+                        last = pushed
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_loop, name=f"ckpt-stream-{stage_tag}", daemon=True)
+    t.start()
+    try:
+        return run_fn()
+    finally:
+        stop.set()
+        t.join(timeout=5)
+
+
 _STAGE_TOOL_ATTRS = {
     "synthesis": "syn_tool",
     "par": "par_tool",
@@ -209,7 +268,7 @@ def cache_or_run(
     if not is_cache_enabled(driver):
         _info(f"PD cache disabled for {stage_tag} (set HAMMER_PD_CACHE=1 or "
               f"vlsi.pd_cache.enabled to turn it on); running normally.")
-        return run_fn()
+        return _run_with_checkpoint_stream(driver, stage_tag, rundir, run_fn)
 
     # Resolve the ledger switch once (honors env var + config key) and pass it
     # to each event record so the time-saved tracker can be turned off.
@@ -287,7 +346,7 @@ def cache_or_run(
     _info(f"PD cache MISS for {stage_tag} (sha256={short}...). Running stage.")
     t0 = time.monotonic()
     cpu0 = _child_cpu_seconds()
-    success, output = run_fn()
+    success, output = _run_with_checkpoint_stream(driver, stage_tag, rundir, run_fn)
     duration_seconds = time.monotonic() - t0
     cpu1 = _child_cpu_seconds()
     cpu_seconds: Optional[float] = None

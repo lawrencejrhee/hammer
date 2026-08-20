@@ -135,7 +135,12 @@ BLOB_CHUNK_BYTES = 128 * 1024 * 1024
 # Checkpoints still use a single bytea value; past this compressed size the
 # insert would die at the same 1 GiB wall, so store_checkpoint refuses with
 # a clear message instead (the local checkpoint still works).
-CHECKPOINT_MAX_BYTES = 450 * 1024 * 1024
+# Overall checkpoint ceiling. Checkpoints past one bytea's practical size are
+# split across pd_checkpoint_chunks (BLOB_CHUNK_BYTES pieces), so this is a
+# sanity bound against runaway rundirs, not a Postgres limit.
+CHECKPOINT_MAX_BYTES = 4 * 1024 * 1024 * 1024
+CHECKPOINT_CHUNK_TABLE = "pd_checkpoint_chunks"
+FQ_CHECKPOINT_CHUNK = f"{SCHEMA_NAME}.{CHECKPOINT_CHUNK_TABLE}"
 
 # Everyone with access to the SledgeHammer Studio tables is in this role.
 # Nobody gets direct table grants; access is purely group membership.
@@ -556,6 +561,19 @@ ALTER TABLE {FQ_CHECKPOINT} ADD COLUMN IF NOT EXISTS saved_seconds REAL;
 CREATE INDEX IF NOT EXISTS idx_{CHECKPOINT_TABLE}_key    ON {FQ_CHECKPOINT} (stage_key);
 CREATE INDEX IF NOT EXISTS idx_{CHECKPOINT_TABLE}_design ON {FQ_CHECKPOINT} (design);
 
+-- Overflow chunks for checkpoints past one bytea's practical size, same
+-- scheme as pd_blob_chunks. The parent pd_checkpoints row keeps the metadata
+-- with an empty data column; fetch_checkpoint reassembles by seq. Without
+-- this, rocket-scale par checkpoints (innovus DB dirs beyond the old 450 MB
+-- cap) were refused and a failed par's progress lived only on local disk.
+CREATE TABLE IF NOT EXISTS {FQ_CHECKPOINT_CHUNK} (
+    stage_key TEXT NOT NULL,
+    step      TEXT NOT NULL,
+    seq       INT NOT NULL,
+    data      BYTEA NOT NULL,
+    PRIMARY KEY (stage_key, step, seq)
+);
+
 -- Nobody gets access by default. The group role is the only way in.
 REVOKE ALL ON SCHEMA {SCHEMA_NAME} FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA {SCHEMA_NAME} FROM PUBLIC;
@@ -775,10 +793,13 @@ def set_notify_email(uid: str, email: str) -> None:
     the logged-in session, never from request input.
     """
     uid = (uid or "").strip().lower()
-    email = (email or "").strip()
+    # Accept a comma-separated list; the mailer sends to every address in the
+    # To: header, so multiple recipients need no other support.
+    parts = [a.strip() for a in (email or "").split(",") if a.strip()]
+    email = ", ".join(parts)
     if not uid:
         raise ValueError("no uid given for notify-email registration")
-    if not _valid_email(email):
+    if not parts or not all(_valid_email(a) for a in parts):
         raise ValueError(f"not a valid email address: {email!r}")
     conn = _connect()
     try:
@@ -2018,10 +2039,15 @@ def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
         is_dir = False
     if len(data) > CHECKPOINT_MAX_BYTES:
         raise RuntimeError(
-            f"checkpoint tarball is {len(data) / 1e6:.0f} MB compressed; "
-            "single-value stores cap out near "
-            f"{CHECKPOINT_MAX_BYTES // (1024 * 1024)} MB, keeping the local "
-            "checkpoint only")
+            f"checkpoint tarball is {len(data) / 1e6:.0f} MB compressed, past "
+            f"the {CHECKPOINT_MAX_BYTES // (1024 * 1024)} MB sanity ceiling; "
+            "keeping the local checkpoint only")
+    # Same overflow scheme as stage blobs: one bytea can't hold rocket-scale
+    # innovus checkpoints, so anything past a chunk goes to
+    # pd_checkpoint_chunks and the parent row keeps empty data.
+    chunks = [data[i:i + BLOB_CHUNK_BYTES]
+              for i in range(0, len(data), BLOB_CHUNK_BYTES)]
+    inline = data if len(chunks) <= 1 else b""
     cols = ("triggering_user", "dag_id", "dag_run_id", "workspace",
             "design", "module", "project")
     vals = [provenance.get(c) for c in cols]
@@ -2040,8 +2066,19 @@ def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
                         stage = EXCLUDED.stage,
                         saved_seconds = EXCLUDED.saved_seconds,
                         created_at = NOW()""",
-                [stage_key, stage, step, psycopg2.Binary(data), len(data), is_dir,
+                [stage_key, stage, step, psycopg2.Binary(inline), len(data), is_dir,
                  saved_seconds] + vals)
+            # Drop chunks from any previous write unconditionally so an inline
+            # rewrite can't leave stale overflow rows behind.
+            cur.execute(
+                f"DELETE FROM {FQ_CHECKPOINT_CHUNK} WHERE stage_key = %s AND step = %s",
+                (stage_key, step))
+            if len(chunks) > 1:
+                for seq, chunk in enumerate(chunks):
+                    cur.execute(
+                        f"INSERT INTO {FQ_CHECKPOINT_CHUNK} (stage_key, step, seq, data) "
+                        f"VALUES (%s, %s, %s, %s)",
+                        (stage_key, step, seq, psycopg2.Binary(chunk)))
         conn.commit()
     return len(data)
 
@@ -2097,6 +2134,19 @@ def fetch_checkpoint(stage_key: Optional[str] = None, step: Optional[str] = None
             names = [d[0] for d in cur.description]
             rec = dict(zip(names, row))
             rec["data"] = bytes(rec["data"])
+            # An empty data column on a non-empty checkpoint means the payload
+            # overflowed into pd_checkpoint_chunks; reassemble by seq.
+            if not rec["data"] and rec.get("size_bytes"):
+                cur.execute(
+                    f"SELECT data FROM {FQ_CHECKPOINT_CHUNK} "
+                    f"WHERE stage_key = %s AND step = %s ORDER BY seq",
+                    (rec["stage_key"], rec["step"]))
+                rec["data"] = b"".join(bytes(r[0]) for r in cur.fetchall())
+                if len(rec["data"]) != rec["size_bytes"]:
+                    raise RuntimeError(
+                        f"checkpoint {rec['stage_key'][:16]}.../{rec['step']} "
+                        f"reassembled to {len(rec['data'])} bytes, expected "
+                        f"{rec['size_bytes']}; refusing the truncated payload")
             return rec
 
 
@@ -2144,8 +2194,17 @@ def delete_checkpoints(stage_key: Optional[str] = None, design: Optional[str] = 
     with _connect() as conn:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
-            cur.execute(f"DELETE FROM {FQ_CHECKPOINT} WHERE " + " AND ".join(where), params)
-            n = cur.rowcount
+            # Reap overflow chunks with their parents in the same statement so
+            # a filtered delete can't strand multi-GB chunk rows.
+            cur.execute(
+                f"DELETE FROM {FQ_CHECKPOINT} WHERE " + " AND ".join(where) +
+                f" RETURNING stage_key, step", params)
+            gone = cur.fetchall()
+            n = len(gone)
+            for sk, st in gone:
+                cur.execute(
+                    f"DELETE FROM {FQ_CHECKPOINT_CHUNK} WHERE stage_key = %s AND step = %s",
+                    (sk, st))
         conn.commit()
     return n
 
