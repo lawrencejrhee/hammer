@@ -4,7 +4,7 @@ Quick guide for getting the cache and permissions running against any Postgres c
 
 ## What you need
 
-- A Postgres cluster you control (laptop, lab server, RDS, conda Postgres, whatever). You need to be able to `CREATE DATABASE` and `CREATE ROLE` on it.
+- A Postgres cluster you control (laptop, lab server, RDS, conda Postgres, whatever). You need to be able to `CREATE DATABASE` and `CREATE ROLE` on it. Don't have one? [LOCAL_POSTGRES_SETUP.md](LOCAL_POSTGRES_SETUP.md) walks through standing one up in your own directory, no root needed, and covers the Airflow side too.
 - This repo, on the `master` branch.
 - A working venv (we use `.venv/` at the repo root).
 
