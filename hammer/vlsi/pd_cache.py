@@ -55,6 +55,50 @@ from hammer.vlsi.time_tracking import (
 )
 
 
+def _live_tool_cpu_seconds() -> Optional[float]:
+    """CPU seconds burned so far by this process's still-running descendants.
+
+    _child_cpu_seconds uses RUSAGE_CHILDREN, which only counts children that
+    have already been waited on -- it reads zero while the tool is still
+    running. Checkpoint CPU stamps have to be taken mid-run, so read
+    utime+stime straight out of /proc for the whole descendant tree instead.
+    Returns None off Linux or if /proc is unreadable.
+    """
+    try:
+        ticks = os.sysconf("SC_CLK_TCK")
+        me = os.getpid()
+        kids: Dict[int, list] = {}
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat") as f:
+                    fields = f.read().rsplit(")", 1)[1].split()
+                ppid = int(fields[1])
+                kids.setdefault(ppid, []).append(int(entry))
+            except (OSError, ValueError, IndexError):
+                continue
+        total = 0.0
+        stack = [me]
+        seen = set()
+        while stack:
+            pid = stack.pop()
+            if pid in seen:
+                continue
+            seen.add(pid)
+            for child in kids.get(pid, []):
+                stack.append(child)
+                try:
+                    with open(f"/proc/{child}/stat") as f:
+                        fields = f.read().rsplit(")", 1)[1].split()
+                    total += (int(fields[11]) + int(fields[12])) / ticks
+                except (OSError, ValueError, IndexError):
+                    continue
+        return total
+    except Exception:
+        return None
+
+
 def _child_cpu_seconds() -> Optional[float]:
     """
     Cumulative CPU (user + sys) consumed by all child processes waited on so
@@ -166,6 +210,18 @@ def _run_with_checkpoint_stream(driver, stage_tag, rundir, run_fn):
         while not stop.wait(interval):
             try:
                 confirmed = substep_resume.confirmed_checkpoints(rundir, log_name)
+                # stamp cumulative tool CPU beside every checkpoint we see, so
+                # a later resume can price the steps it skips in CPU as well as
+                # wall time (checkpoint mtimes only carry the latter)
+                cpu_now = _live_tool_cpu_seconds()
+                if cpu_now is not None:
+                    for step in confirmed:
+                        stamp = Path(rundir) / f"pre_{step}.cpustamp"
+                        if not stamp.exists():
+                            try:
+                                stamp.write_text(f"{cpu_now:.3f}\n")
+                            except OSError:
+                                pass
                 if confirmed and confirmed[-1] != last:
                     pushed = substep_resume.push_checkpoint_db(
                         driver, stage_tag, rundir, log_name, module=module)

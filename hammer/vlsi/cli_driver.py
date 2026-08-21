@@ -847,6 +847,7 @@ class CLIDriver:
                             time_tracking.record_event(
                                 "synthesis", "RESUME",
                                 saved_seconds=resume_plan.get("saved_seconds"),
+                                saved_cpu_seconds=resume_plan.get("saved_cpu_seconds"),
                                 module=resume_module)
                         except Exception:
                             pass
@@ -1007,6 +1008,7 @@ class CLIDriver:
                             time_tracking.record_event(
                                 "par", "RESUME",
                                 saved_seconds=par_resume_plan.get("saved_seconds"),
+                                saved_cpu_seconds=par_resume_plan.get("saved_cpu_seconds"),
                                 module=par_resume_module)
                         except Exception:
                             pass

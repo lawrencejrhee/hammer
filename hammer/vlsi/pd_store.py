@@ -558,6 +558,7 @@ CREATE TABLE IF NOT EXISTS {FQ_CHECKPOINT} (
     UNIQUE (stage_key, step)
 );
 ALTER TABLE {FQ_CHECKPOINT} ADD COLUMN IF NOT EXISTS saved_seconds REAL;
+ALTER TABLE {FQ_CHECKPOINT} ADD COLUMN IF NOT EXISTS saved_cpu_seconds REAL;
 CREATE INDEX IF NOT EXISTS idx_{CHECKPOINT_TABLE}_key    ON {FQ_CHECKPOINT} (stage_key);
 CREATE INDEX IF NOT EXISTS idx_{CHECKPOINT_TABLE}_design ON {FQ_CHECKPOINT} (design);
 
@@ -2049,6 +2050,7 @@ def list_stage_blobs(
 
 def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
                      saved_seconds: Optional[float] = None,
+                     saved_cpu_seconds: Optional[float] = None,
                      **provenance: Any) -> int:
     """Upsert one sub-step checkpoint (file gzipped, directory tarred).
 
@@ -2082,17 +2084,18 @@ def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
             cur.execute(
                 f"""INSERT INTO {FQ_CHECKPOINT}
                     (stage_key, stage, step, data, size_bytes, is_dir, saved_seconds,
-                     {", ".join(cols)})
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, {", ".join(["%s"] * len(cols))})
+                     saved_cpu_seconds, {", ".join(cols)})
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, {", ".join(["%s"] * len(cols))})
                     ON CONFLICT (stage_key, step) DO UPDATE SET
                         data = EXCLUDED.data,
                         size_bytes = EXCLUDED.size_bytes,
                         is_dir = EXCLUDED.is_dir,
                         stage = EXCLUDED.stage,
                         saved_seconds = EXCLUDED.saved_seconds,
+                        saved_cpu_seconds = EXCLUDED.saved_cpu_seconds,
                         created_at = NOW()""",
                 [stage_key, stage, step, psycopg2.Binary(inline), len(data), is_dir,
-                 saved_seconds] + vals)
+                 saved_seconds, saved_cpu_seconds] + vals)
             # Drop chunks from any previous write unconditionally so an inline
             # rewrite can't leave stale overflow rows behind.
             cur.execute(
@@ -2146,7 +2149,8 @@ def fetch_checkpoint(stage_key: Optional[str] = None, step: Optional[str] = None
     if ckpt_id is not None:
         where.append("id = %s")
         params.append(ckpt_id)
-    sql = (f"SELECT id, stage_key, stage, step, data, size_bytes, is_dir, saved_seconds "
+    sql = (f"SELECT id, stage_key, stage, step, data, size_bytes, is_dir, saved_seconds, "
+           f"saved_cpu_seconds "
            f"FROM {FQ_CHECKPOINT} WHERE " + " AND ".join(where))
     sql += " ORDER BY created_at DESC LIMIT 1"
     with _connect() as conn:

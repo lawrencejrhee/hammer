@@ -903,6 +903,11 @@ def savings_csv(events: List[Dict[str, Any]], group_by: str = "project") -> str:
     Eight numeric columns, wall-clock and compute (CPU) seconds for each of
     the three savings categories and their sums:
 
+      legacy skip     - SKIP_LOCAL events legacy make would ALSO have
+                        skipped: real time not spent, but no credit, so it
+                        is reported beside the totals rather than inside them
+      ran             - tool time that actually executed (successful stages)
+
       dep management  - SKIP_LOCAL events where legacy make's mtime rule
                         would have rerun the stage (make_would_rerun=True)
       caching         - HIT / SKIP_RESTORED blob restores
@@ -924,7 +929,9 @@ def savings_csv(events: List[Dict[str, Any]], group_by: str = "project") -> str:
             "caching_wall_s", "caching_cpu_s",
             "checkpointing_wall_s", "checkpointing_cpu_s",
             "parallel_wall_s", "parallel_cpu_s",
-            "total_wall_saved_s", "total_cpu_saved_s"]
+            "total_wall_saved_s", "total_cpu_saved_s",
+            "legacy_skip_wall_s", "legacy_skip_cpu_s",
+            "ran_wall_s", "ran_cpu_s"]
     lines = [",".join([label] + cols)]
 
     def _row(name: str, b: Dict[str, Any], par_w: float) -> str:
@@ -932,7 +939,9 @@ def savings_csv(events: List[Dict[str, Any]], group_by: str = "project") -> str:
         cache_w, cache_c = b["cache_wall"], b["cache_cpu"]
         ck_w, ck_c = b["resume_wall"], b["resume_cpu"]
         vals = [dep_w, dep_c, cache_w, cache_c, ck_w, ck_c, par_w, 0.0,
-                dep_w + cache_w + ck_w + par_w, dep_c + cache_c + ck_c]
+                dep_w + cache_w + ck_w + par_w, dep_c + cache_c + ck_c,
+                b.get("deplegacy_wall", 0.0), b.get("deplegacy_cpu", 0.0),
+                b.get("ran_wall", 0.0), b.get("ran_cpu", 0.0)]
         safe = str(name).replace(",", ";")
         return ",".join([safe] + [f"{v:.1f}" for v in vals])
 
@@ -1043,7 +1052,8 @@ def format_savings_report(events: List[Dict[str, Any]],
     #   legacy skip  - dep-check skips make would also have skipped (or the
     #                  make verdict is unknown). No SledgeHammer credit.
     header = (f"{label:<30}  {'events':>6}  {'hits':>5}  {'miss':>5}  "
-              f"{'cache saved':>12}  {'depchk saved':>12}  {'legacy skip':>12}  {'wall ran':>12}")
+              f"{'cache saved':>12}  {'depchk saved':>12}  {'legacy skip':>12}  "
+              f"{'lgcy skip cpu':>13}  {'wall ran':>12}  {'cpu ran':>12}")
     lines.append("")
     lines.append(header)
     lines.append("-" * len(header))
@@ -1054,7 +1064,9 @@ def format_savings_report(events: List[Dict[str, Any]],
             f"{_short(gk, 30):<30}  {b['events']:>6}  {b['hits']:>5}  {b['misses']:>5}  "
             f"{_format_duration(b['cache_wall']):>12}  {_format_duration(b['depsh_wall']):>12}  "
             f"{_format_duration(b['deplegacy_wall']):>12}  "
-            f"{_format_duration(b['ran_wall']):>12}")
+            f"{_format_duration(b['deplegacy_cpu']):>13}  "
+            f"{_format_duration(b['ran_wall']):>12}  "
+            f"{_format_duration(b['ran_cpu']):>12}")
     lines.append("-" * len(header))
 
     def _pair(wall: float, cpu: float) -> str:

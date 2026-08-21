@@ -295,6 +295,27 @@ def _log_info(driver: Any, msg: str) -> None:
         pass
 
 
+def _cpu_saved(rundir: str, first_step: str, resume_step: str):
+    """CPU seconds the skipped steps burned, from the checkpoint CPU stamps.
+
+    pd_cache's streamer writes pre_<step>.cpustamp beside each checkpoint as
+    the tool confirms it, holding cumulative tool CPU at that moment. The
+    difference between the first and the resume point is what a resume avoids
+    re-running. Returns None when the stamps are absent (a run from before
+    stamping, or a stage with no streamer), which the ledger records as
+    unknown rather than zero.
+    """
+    def read(step):
+        try:
+            return float(open(os.path.join(rundir, f"pre_{step}.cpustamp")).read().strip())
+        except (OSError, ValueError):
+            return None
+    a, b = read(first_step), read(resume_step)
+    if a is None or b is None:
+        return None
+    return max(0.0, b - a)
+
+
 def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
                        log_name: str = "genus.log",
                        module: Optional[str] = None) -> Optional[str]:
@@ -336,6 +357,8 @@ def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
         try:
             size = pd_store.store_checkpoint(key, stage_tag, step, Path(path),
                                              saved_seconds=saved,
+                                             saved_cpu_seconds=_cpu_saved(
+                                                 rundir, confirmed[0], step),
                                              module=module,
                                              **_provenance(driver))
         except Exception as exc:
@@ -415,6 +438,7 @@ def _db_fallback_plan(driver: Any, stage_tag: str, rundir: str) -> Optional[Dict
         _log_info(driver, f"Fetched checkpoint pre_{step} "
                           f"({rec['size_bytes'] / 1e6:.1f} MB) from the database.")
         return {"step": step, "saved_seconds": rec.get("saved_seconds"),
+                "saved_cpu_seconds": rec.get("saved_cpu_seconds"),
                 "key": key, "source": "database"}
     except Exception:
         return None
@@ -524,7 +548,9 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
         if burned != marker.get("burned", []):
             marker["burned"] = burned
             write_marker(rundir, marker)
-        return {"step": step, "saved_seconds": saved, "key": key}
+        return {"step": step, "saved_seconds": saved,
+                "saved_cpu_seconds": _cpu_saved(rundir, confirmed[0], step),
+                "key": key}
     except Exception:
         return None
 
