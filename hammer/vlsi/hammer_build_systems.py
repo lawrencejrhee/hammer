@@ -7,6 +7,9 @@ from .driver import HammerDriver
 
 import getpass
 import os
+import datetime
+import shutil
+import hashlib
 import re
 import sys
 import textwrap
@@ -1439,12 +1442,60 @@ def hammer_dag():
 
     output += "\ndag_instance = hammer_dag()\n"
 
+    # fingerprint the body so a later rebuild can tell generated from edited
+    output += ("\n# sledgehammer-generated-sha256: "
+               + hashlib.sha256(output.encode("utf-8")).hexdigest() + "\n")
+    _preserve_hand_edits(dag_file, output)
     with open(dag_file, "w") as f:
         f.write(output)
 
     _link_dag_into_dags_folder(driver, dag_file, unique_dag_id)
 
     return dependency_graph
+
+
+def _preserve_hand_edits(dag_file: str, new_text: str) -> None:
+    """Never silently discard a DAG someone edited by hand.
+
+    Generated DAGs carry a fingerprint of their own body on the last line.
+    If the file on disk no longer matches its fingerprint, a human changed it
+    -- a custom step, an extra hook, a tweaked trigger rule -- and a rebuild
+    would erase that work. Copy it aside first and say where it went, loudly
+    enough to notice in a make log. An unchanged (or absent) file just gets
+    replaced as before.
+    """
+    if not os.path.exists(dag_file):
+        return
+    try:
+        old = open(dag_file).read()
+    except OSError:
+        return
+    marker = "# sledgehammer-generated-sha256: "
+    idx = old.rfind(marker)
+    if idx != -1:
+        tail = old[idx + len(marker):]
+        recorded = tail.strip().split()[0] if tail.strip() else ""
+        body = old[:idx]
+        # the whole file must be exactly body + marker + hash + newline;
+        # anything appended after the fingerprint counts as an edit too
+        expected = body + marker + recorded + "\n"
+        if old == expected and \
+                hashlib.sha256(body.encode("utf-8")).hexdigest() == recorded:
+            return          # untouched since generation: safe to overwrite
+    elif old == new_text:
+        return              # pre-fingerprint file, identical anyway
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    backup = f"{dag_file}.hand-edited-{stamp}"
+    try:
+        shutil.copy2(dag_file, backup)
+    except OSError:
+        return
+    print("=" * 72)
+    print(f"NOTE: {os.path.basename(dag_file)} had hand edits; they are NOT in the")
+    print(f"      regenerated DAG. Saved your version to:")
+    print(f"        {backup}")
+    print(f"      Re-apply anything you still need from it.")
+    print("=" * 72)
 
 
 def _link_dag_into_dags_folder(driver, dag_file: str, dag_id: str) -> None:
