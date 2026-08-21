@@ -77,17 +77,26 @@ make syn
 make par
 ```
 
-SledgeHammer folds the generate into the first run:
+SledgeHammer keeps the same two steps -- only the second word changes:
 
 ```bash
 cd rocket-vlsi
-sledgehammer syn      # generates and registers the DAG if there is none
+make buildfile        # unchanged: hammer build -> hammer.d AND the DAG
+sledgehammer syn
 sledgehammer par
 ```
 
-Both read `OBJ_DIR` from the Makefile, so no flags are needed inside a
-workspace. `make buildfile` still works and registers the DAG too -- the same
-`build` action emits the Makefile include and the DAG.
+`make buildfile` stays the way a DAG is created; the same `build` action emits
+the Makefile include and the DAG, and registers it. `sledgehammer` only runs
+what is already registered -- it never builds, so it cannot surprise you by
+regenerating a DAG you customized. Both read `OBJ_DIR` from the Makefile, so
+no flags are needed inside a workspace.
+
+If you have hand-edited a generated DAG, a later `make buildfile` will not
+silently discard it: the file is copied to
+`hammer_dag.py.hand-edited-<timestamp>` and the rebuild says so. For changes
+meant to last, prefer driver hooks (`get_extra_hierarchical_par_hooks` and
+friends) -- those survive regeneration because they live in the driver.
 
 The one prerequisite `make` does not have: the Airflow stack must be running
 (api-server, scheduler, dag-processor, triggerer). It is a service you start
@@ -100,10 +109,10 @@ once per machine, not per run.
 The flags are Hammer's, so a Makefile switches over by changing the binary.
 
 ```bash
-# generate the DAG if missing, trigger, stream to the terminal, exit with the run's status
-sledgehammer run syn par -e env.yml -p design.yml --obj_dir build/ChipTop
+# trigger, stream to the terminal, exit with the run's status
+sledgehammer run syn par --obj_dir build/ChipTop
 
-# the DAG is already registered: -e/-p are only needed to (re)generate it
+# stages compose; these two run in parallel
 sledgehammer run drc lvs --obj_dir build/ChipTop
 
 # fire and forget
@@ -115,7 +124,6 @@ sim_par timing_par formal_par power_par drc lvs` (dashes accepted).
 
 | Flag | Meaning |
 |---|---|
-| `-e`, `-p` | environment / project configs, repeatable, same as hammer |
 | `--obj_dir` | build directory (required) |
 | `--design` | design name; defaults to the obj_dir basename |
 | `--module M` | restrict to these modules, repeatable (hierarchical flows) |
@@ -125,7 +133,6 @@ sim_par timing_par formal_par power_par drc lvs` (dashes accepted).
 | `--steps-stage {syn,par}` | which stage the step flags apply to |
 | `--workspace`, `--project` | workspace routing, ledger project label |
 | `--run-id` | name the run instead of an auto `cli_<epoch>` |
-| `--regen` | regenerate the DAG even if one is registered |
 | `--no-wait` | trigger and return immediately |
 
 The exit code follows the run, so `sledgehammer run ... && next-step` behaves.
@@ -269,7 +276,7 @@ instead of things you type.
 | `make syn-RocketTile` | `sledgehammer syn-RocketTile` |
 | `make par-RocketTile` | `sledgehammer par-RocketTile` |
 | `make redo-syn-RocketTile` | `sledgehammer redo-syn-RocketTile` |
-| `make build/Top/hammer.d` | *(implicit — generated on first run)* |
+| `make buildfile` | `make buildfile` *(unchanged — sledgehammer never builds)* |
 | `make hier-par-to-syn-Top` | *(implicit — a DAG edge)* |
 | `make par-A; make par-B; ...` (7×, serial) | `sledgehammer par` (all leaves, parallel) |
 
@@ -281,9 +288,9 @@ Raw driver form, if you prefer it over the Makefile:
     -p specs/constr/iris-rockettile.yml ... -p build/IrisVLSITop/inputs.yml \
     --obj_dir build/IrisVLSITop par
 
-# sledgehammer: configs only when generating; afterwards the DAG remembers
-sledgehammer run par -e env.yml -p design-dag.yml --obj_dir build/IrisVLSITop
-sledgehammer par -t IrisVLSITop        # every later run
+# sledgehammer: make buildfile once, then the DAG remembers the configs
+make buildfile
+sledgehammer par -t IrisVLSITop        # every run, from anywhere
 ```
 
 ### Flags
@@ -292,7 +299,7 @@ Identical to `hammer-vlsi` unless noted.
 
 | Flag | Legacy | SledgeHammer |
 |---|---|---|
-| `-e`, `-p` | yes | yes (only needed to generate the DAG) |
+| `-e`, `-p` | yes | n/a — configs are baked in at `make buildfile` |
 | `--obj_dir` | yes | optional — read from the registered DAG |
 | `-t`, `--top` | yes | yes (`--design` also accepted) |
 | `--force` | yes | yes (`--redo` also accepted) |
@@ -302,7 +309,7 @@ Identical to `hammer-vlsi` unless noted.
 | `--only_step` | yes | yes |
 | `--module M` | n/a (separate target per module) | restrict to modules, repeatable |
 | `--workspace`, `--project` | n/a | workspace routing, ledger label |
-| `--no-wait`, `--run-id`, `--regen` | n/a | trigger-and-return, name a run, force regeneration |
+| `--no-wait`, `--run-id` | n/a | trigger-and-return, name a run |
 | `--syn_rundir` etc. | yes | not mirrored — the DAG derives rundirs per module |
 | `-v`, `-f`, `-o` | yes | not mirrored — inputs and outputs flow along DAG edges |
 
@@ -314,8 +321,7 @@ DAG has `OBJ_DIR` baked in, so running one needs neither:
 1. `--obj_dir` when given
 2. `-t <top>` → read out of that DAG
 3. bare command → the DAG whose `OBJ_DIR` is under the current directory
-4. `$OBJ_DIR`, then the Makefile — only when nothing is registered yet and the
-   DAG is about to be generated
+4. `$OBJ_DIR`, then the Makefile (`make --eval` asks it directly)
 
 ### Actions with no legacy equivalent
 

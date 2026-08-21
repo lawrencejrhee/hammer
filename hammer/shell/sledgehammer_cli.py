@@ -14,13 +14,12 @@ CLI, with the database secrets and AIRFLOW_HOME loaded first, so commands like
 
 Flow commands -- hammer's flags, the DAG as plumbing, no GUI required:
 
-  sledgehammer run syn par -e env.yml -p design.yml --obj_dir build/Top
-      Generate the DAG if it is missing (hammer build with the sledgehammer
-      build system), register it, trigger the selected stages, and stream
-      task states to the terminal until the run finishes. Exit code follows
-      the run, so it drops into a Makefile exactly where hammer-vlsi did.
+  sledgehammer run syn par --obj_dir build/Top
+      Trigger the selected stages on an already-registered DAG and stream
+      task states until the run finishes. Exit code follows the run, so it
+      drops into a Makefile exactly where hammer-vlsi did. Generate the DAG
+      the usual way first: cd <vlsi dir> && make buildfile.
   sledgehammer run drc lvs --obj_dir build/Top
-      Reuse the registered DAG; -e/-p only needed when (re)generating.
   sledgehammer run syn --obj_dir build/Top --no-wait
       Trigger and return immediately (prints the run id).
   cd vlsi && sledgehammer par-RocketTile
@@ -302,14 +301,11 @@ def _infer_obj_dir():
 def _cmd_run(args) -> int:
     import argparse
     import getpass
-    import tempfile
     p = argparse.ArgumentParser(
         prog="sledgehammer run",
         description="Run flow stages through the DAG with hammer's flags.")
     p.add_argument("actions", nargs="+",
                    help=f"stages to run: {', '.join(_STAGES)} (dashes ok)")
-    p.add_argument("-e", "--environment_config", action="append", default=[])
-    p.add_argument("-p", "--project_config", action="append", default=[])
     p.add_argument("--obj_dir", help="build directory; taken from the "
                    "registered DAG, or $OBJ_DIR / the Makefile, when omitted")
     # hammer spells the design's top module -t/--top; --design is our alias
@@ -331,8 +327,6 @@ def _cmd_run(args) -> int:
     p.add_argument("--steps_stage", "--steps-stage", dest="steps_stage",
                    choices=["syn", "par"], default="syn")
     p.add_argument("--run-id")
-    p.add_argument("--regen", action="store_true",
-                   help="regenerate the DAG even if one is registered")
     p.add_argument("--no-wait", action="store_true",
                    help="trigger and return; do not stream the run")
     a = p.parse_args(args)
@@ -373,33 +367,13 @@ def _cmd_run(args) -> int:
     dag_id = f"sledgehammer_{design}_{user}"
     dag_file = os.path.join(dags_folder, f"{dag_id}.py")
 
-    if a.regen or not os.path.exists(dag_file):
-        if not a.project_config:
-            sys.exit(f"[sledgehammer] no DAG registered as {dag_file}\n"
-                     f"  (dags folder from {dags_src})\n"
-                     f"  Pass -e/-p to generate it, or set HAMMER_DAGS_FOLDER "
-                     f"if your DAGs live elsewhere.")
-        # hammer's own build action with the sledgehammer build system emits
-        # hammer_dag.py into obj_dir and registers it under HAMMER_DAGS_FOLDER.
-        with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as f:
-            f.write("vlsi.core.build_system: sledgehammer\n")
-            overlay = f.name
-        cmd = [_venv_bin("hammer-vlsi")]
-        for e in a.environment_config:
-            cmd += ["-e", e]
-        for c in a.project_config:
-            cmd += ["-p", c]
-        cmd += ["-p", overlay, "--obj_dir", obj_dir, "build"]
-        env = dict(os.environ, HAMMER_DAGS_FOLDER=dags_folder)
-        print(f"[sledgehammer] generating DAG for {design} ...")
-        if subprocess.run(cmd, env=env).returncode != 0:
-            sys.exit("[sledgehammer] DAG generation failed")
-        _airflow("dags", "reserialize", capture=True)
-        for _ in range(30):
-            rc, out, _ = _airflow("dags", "list", "-o", "plain")
-            if dag_id in out:
-                break
-            time.sleep(10)
+    if not os.path.exists(dag_file):
+        sys.exit(
+            f"[sledgehammer] no DAG registered for {design}.\n"
+            f"  looked for: {dag_file}\n"
+            f"  (dags folder from {dags_src})\n"
+            f"  Generate it first, the same way you always have:\n"
+            f"      cd <vlsi dir> && make buildfile")
 
     _airflow("dags", "unpause", dag_id)
     conf = {s: True for s in actions}
