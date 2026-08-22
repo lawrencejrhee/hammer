@@ -101,6 +101,57 @@ def _send_completion_email(to, subject, html):
         server.quit()
 
 
+def _outcomes_path(dag_id, run_id, create_dir=False):
+    import os
+    home = os.environ.get("AIRFLOW_HOME") or os.path.expanduser("~/airflow")
+    d = os.path.join(home, "stage_outcomes")
+    if create_dir:
+        os.makedirs(d, exist_ok=True)
+    safe = lambda s: "".join(c if c.isalnum() or c in "._-" else "_" for c in str(s))
+    return os.path.join(d, f"{safe(dag_id)}__{safe(run_id)}.jsonl")
+
+
+def record_stage_outcome(dag_id, run_id, task_id, action, state, seconds):
+    """Append one stage outcome for the completion email. Never raises."""
+    try:
+        import json, time
+        path = _outcomes_path(dag_id, run_id, create_dir=True)
+        with open(path, "a") as f:
+            f.write(json.dumps({"ts": time.time(), "task": task_id,
+                                "action": action, "state": state,
+                                "seconds": round(float(seconds), 1)}) + "\n")
+    except Exception as e:
+        print(f"[notify] could not record stage outcome: {e}")
+
+
+def _stage_outcome_lines(dag_id, run_id):
+    """The recorded outcomes for one run, oldest first, formatted for the mail."""
+    try:
+        import json
+        rows = []
+        with open(_outcomes_path(dag_id, run_id)) as f:
+            for line in f:
+                if line.strip():
+                    rows.append(json.loads(line))
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f"[notify] could not read stage outcomes: {e}")
+        return []
+    rows.sort(key=lambda r: r.get("ts") or 0)
+    out = []
+    for r in rows:
+        secs = r.get("seconds") or 0
+        if secs >= 5400:
+            dur = f"{secs / 3600.0:.1f}h"
+        elif secs >= 90:
+            dur = f"{secs / 60.0:.0f}m"
+        else:
+            dur = f"{secs:.0f}s"
+        out.append(f"{r.get('task') or r.get('action')}: {r.get('state')} ({dur})")
+    return out
+
+
 def notify_run_finished(context, state, gen_user=None):
     """Email whoever owns this run that it has ended. Called from a task.
 
@@ -129,10 +180,48 @@ def notify_run_finished(context, state, gen_user=None):
             f"Run: {run_id}<br>"
             f"Status: {state}"
         )
+        stages = _stage_outcome_lines(dag_id, run_id)
+        if stages:
+            html += "<br><br>Stages:<br>" + "<br>".join(stages)
         _send_completion_email(to, subject, html)
         print(f"[notify] emailed {to} about {dag_id} {run_id} ({state})")
     except Exception as e:
         print(f"[notify] FAILED to send completion mail for {dag_id} {run_id}: "
+              f"{type(e).__name__}: {e}")
+
+
+def notify_stage_finished(context, task_id, action, state, seconds, gen_user=None):
+    """Email that a single stage ended. Called from the stage task itself.
+
+    Complements the end-of-run summary: a long par finishing (or any stage
+    failing) is worth knowing about hours before the run's last task sends
+    the full report. Never raises, same contract as notify_run_finished.
+    """
+    dag_run = context.get("dag_run") if isinstance(context, dict) else getattr(context, "dag_run", None)
+    dag_id = getattr(dag_run, "dag_id", None) or "unknown"
+    run_id = getattr(dag_run, "run_id", None) or "unknown"
+    try:
+        to = _resolve_notify_email(context, gen_user=gen_user)
+        if not to:
+            print(f"[notify] {dag_id} {run_id} {task_id} ({state}): no recipient, not sending")
+            return
+        if seconds >= 5400:
+            dur = f"{seconds / 3600.0:.1f}h"
+        elif seconds >= 90:
+            dur = f"{seconds / 60.0:.0f}m"
+        else:
+            dur = f"{seconds:.0f}s"
+        subject = f"[Sledgehammer] {dag_id} {task_id} {state}"
+        html = (
+            f"Stage {task_id} finished: {state} ({dur})<br><br>"
+            f"DAG: {dag_id}<br>"
+            f"Run: {run_id}<br><br>"
+            "The full stage summary arrives when the run ends."
+        )
+        _send_completion_email(to, subject, html)
+        print(f"[notify] emailed {to}: {task_id} {state} ({dur})")
+    except Exception as e:
+        print(f"[notify] FAILED to send stage mail for {dag_id} {run_id} {task_id}: "
               f"{type(e).__name__}: {e}")
 
 

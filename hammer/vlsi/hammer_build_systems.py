@@ -825,8 +825,34 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             # stdin closed so a tool that errors out and falls back to an
             # interactive prompt (innovus does this) exits on EOF instead of
             # hanging the task forever.
+            import time
+            _t0 = time.time()
             res = subprocess.run(cmd, cwd=WORK_DIR, env=sub_env,
                                  stdin=subprocess.DEVNULL)
+            _state = "success" if res.returncode == 0 else "failed"
+            # stage outcomes feed the completion email; bridge actions are
+            # bookkeeping rather than stages, so they stay out of it
+            if context is not None and "-to-" not in action_clean and not action_clean.startswith("hier-"):
+                _secs = time.time() - _t0
+                try:
+                    from hammer.vlsi.pd_notify import record_stage_outcome
+                    record_stage_outcome(context["dag_run"].dag_id,
+                                         context["dag_run"].run_id,
+                                         context["ti"].task_id,
+                                         action_clean, _state, _secs)
+                except Exception as _e:
+                    print(f"[notify] stage outcome not recorded: {{_e}}")
+                # mail per stage: failures right away, successes when the stage
+                # was long enough to be worth a note. stage_mails=false in the
+                # trigger conf silences these; the end-of-run summary still goes.
+                if _mods.get("stage_mails", True) and (_state == "failed" or _secs >= 120):
+                    try:
+                        from hammer.vlsi.pd_notify import notify_stage_finished
+                        notify_stage_finished(context, context["ti"].task_id,
+                                              action_clean, _state, _secs,
+                                              gen_user=GEN_USER)
+                    except Exception as _e:
+                        print(f"[notify] stage mail not sent: {{_e}}")
             if res.returncode != 0:
                 raise AirflowFailException(f"Hammer action {{action_clean}} failed with exit code {{res.returncode}}")
 
@@ -1477,10 +1503,14 @@ def _preserve_hand_edits(dag_file: str, new_text: str) -> None:
         recorded = tail.strip().split()[0] if tail.strip() else ""
         body = old[:idx]
         # the whole file must be exactly body + marker + hash + newline;
-        # anything appended after the fingerprint counts as an edit too
+        # anything appended after the fingerprint counts as an edit too.
+        # The generator hashes the content and then appends "\n" + marker,
+        # so the newline just before the marker is a separator, not part of
+        # what was hashed.
+        content = body[:-1] if body.endswith("\n") else body
         expected = body + marker + recorded + "\n"
         if old == expected and \
-                hashlib.sha256(body.encode("utf-8")).hexdigest() == recorded:
+                hashlib.sha256(content.encode("utf-8")).hexdigest() == recorded:
             return          # untouched since generation: safe to overwrite
     elif old == new_text:
         return              # pre-fingerprint file, identical anyway
