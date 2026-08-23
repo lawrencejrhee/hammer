@@ -1221,8 +1221,27 @@ def delete_blobs(**filters: Any) -> int:
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
+            # the bytes live in the chunk table with no cascade, so drop them
+            # first or a delete frees nothing
+            cur.execute(
+                f"DELETE FROM {FQ_BLOB_CHUNK} WHERE sha256 IN "
+                f"(SELECT sha256 FROM {FQ_BLOB}{where})", params)
             cur.execute(f"DELETE FROM {FQ_BLOB}{where}", params)
             return cur.rowcount
+    finally:
+        conn.close()
+
+
+def delete_stage_blob(sha256: str) -> bool:
+    """Delete one blob and its chunks. Returns True if a row was removed."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DELETE FROM {FQ_BLOB_CHUNK} WHERE sha256 = %s", (sha256,))
+            cur.execute(f"DELETE FROM {FQ_BLOB} WHERE sha256 = %s", (sha256,))
+            n = cur.rowcount
+        conn.commit()
+        return n > 0
     finally:
         conn.close()
 
@@ -1739,6 +1758,18 @@ def store_stage_blob(
                         (sha256, seq, psycopg2.Binary(chunk)),
                     )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def blob_created_at(sha256: str) -> Optional[float]:
+    """Epoch seconds at which a blob was stored, or None if absent."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT created_at FROM {FQ_BLOB} WHERE sha256 = %s", (sha256,))
+            row = cur.fetchone()
+        return row[0].timestamp() if row and row[0] is not None else None
     finally:
         conn.close()
 

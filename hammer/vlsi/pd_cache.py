@@ -268,14 +268,9 @@ def _normalize_obj_dir_paths(value: Any, obj_dir: str) -> Any:
 _INPUT_HASH_LIMIT = 256 * 1024 * 1024
 
 
-def _stage_input_fingerprint(db: Dict[str, Any], stage_tag: str, obj_dir: str) -> str:
-    """sha256 over what a stage actually consumes from the build dir: the
-    upstream outputs named under <stage>.inputs.* that live under obj_dir.
-    Hashing their contents (not their paths) makes the key follow the data
-    across directories and notice an upstream rerun that left a different
-    file at the same path. Layout-sized files contribute size and mtime
-    instead of their bytes."""
-    import hashlib
+def _stage_input_paths(db: Dict[str, Any], stage_tag: str, obj_dir: str) -> List[str]:
+    """The upstream outputs a stage consumes from the build dir: files named
+    under <stage>.inputs.* that live under obj_dir."""
     import os
     paths: List[str] = []
 
@@ -293,8 +288,25 @@ def _stage_input_fingerprint(db: Dict[str, Any], stage_tag: str, obj_dir: str) -
     for k, v in db.items():
         if k.startswith(stage_tag + ".inputs"):
             walk(v)
+    return sorted(set(paths))
+
+
+def _newest_input_mtime(db: Dict[str, Any], stage_tag: str, obj_dir: str) -> Optional[float]:
+    import os
+    paths = _stage_input_paths(db, stage_tag, obj_dir)
+    return max(os.stat(p).st_mtime for p in paths) if paths else None
+
+
+def _stage_input_fingerprint(db: Dict[str, Any], stage_tag: str, obj_dir: str) -> str:
+    """sha256 over what a stage actually consumes from the build dir.
+    Hashing their contents (not their paths) makes the key follow the data
+    across directories and notice an upstream rerun that left a different
+    file at the same path. Layout-sized files contribute size and mtime
+    instead of their bytes."""
+    import hashlib
+    import os
     h = hashlib.sha256()
-    for p in sorted(set(paths)):
+    for p in _stage_input_paths(db, stage_tag, obj_dir):
         st = os.stat(p)
         h.update(os.path.relpath(p, obj_dir).encode("utf-8"))
         h.update(b"\0")
@@ -308,8 +320,13 @@ def _stage_input_fingerprint(db: Dict[str, Any], stage_tag: str, obj_dir: str) -
     return h.hexdigest()
 
 
-def _build_cache_key(driver: Any, stage_tag: str) -> str:
-    """Compute the stage cache key from the live driver config."""
+def _build_cache_key(driver: Any, stage_tag: str, legacy: bool = False) -> str:
+    """Compute the stage cache key from the live driver config.
+
+    legacy=True reproduces the key scheme used before 2026-08-23 (absolute
+    build-dir paths hashed as they were, no input-content fingerprint), so
+    blobs stored under it can still be found and migrated.
+    """
     db_json = driver.database.get_database_json()
     db: Dict[str, Any] = json.loads(db_json)
 
@@ -346,7 +363,7 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
     # design in another directory (or another user's workspace) gets the same
     # key, and a changed upstream output at the same path gets a new one.
     obj_dir = getattr(driver, "obj_dir", None)
-    if obj_dir:
+    if obj_dir and not legacy:
         obj_dir = os.path.normpath(str(obj_dir))
         try:
             db[f"vlsi.pd_cache.input_fingerprint.{stage_tag}"] = \
@@ -356,6 +373,63 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
         db = _normalize_obj_dir_paths(db, obj_dir)
 
     return pd_store.compute_stage_key(db, stage_tag)
+
+
+def _legacy_lookup(driver: Any, stage_tag: str, new_key: str, info, warn):
+    """Find a blob stored under the pre-migration key, if any, and make sure
+    it is not older than the stage's current build-dir inputs. The old key
+    hashed absolute paths, so it cannot tell a fresh syn netlist from the one
+    it was made with; the mtime check stands in for that until the blob has
+    been re-stored under a content-true key. Returns (legacy_key, blob) or
+    (None, None)."""
+    try:
+        lkey = _build_cache_key(driver, stage_tag, legacy=True)
+        if lkey == new_key:
+            return None, None
+        blob = pd_store.load_stage_blob(lkey)
+        if blob is None:
+            return None, None
+        obj_dir = getattr(driver, "obj_dir", None)
+        created = pd_store.blob_created_at(lkey)
+        if obj_dir and created is not None:
+            db = json.loads(driver.database.get_database_json())
+            newest = _newest_input_mtime(db, stage_tag, os.path.normpath(str(obj_dir)))
+            if newest is not None and newest > created:
+                info(f"PD cache: pre-migration blob for {stage_tag} is older than its "
+                     f"inputs; not using it.")
+                return None, None
+        info(f"PD cache: {stage_tag} found under its pre-migration key (sha256={lkey[:16]}...).")
+        return lkey, blob
+    except Exception as e:
+        warn(f"PD cache: legacy-key lookup failed ({e}); treating as a miss.")
+        return None, None
+
+
+def _migrate_blob(stage_tag: str, new_key: str, legacy_key: str, data: bytes,
+                  duration: Optional[float], cpu: Optional[float], info, warn) -> None:
+    """Move a legacy-keyed blob to its new key: store it there, then drop the
+    old entry. The next lookup hits directly and the old key is gone."""
+    try:
+        pd_store.store_stage_blob(
+            stage_tag, new_key, data,
+            duration_seconds=duration, cpu_seconds=cpu,
+            triggering_user=os.environ.get("HAMMER_AIRFLOW_TRIGGERING_USER") or None,
+            dag_id=os.environ.get("HAMMER_AIRFLOW_DAG_ID") or None,
+            dag_run_id=os.environ.get("HAMMER_AIRFLOW_RUN_ID") or None,
+            workspace=os.environ.get("HAMMER_AIRFLOW_WORKSPACE") or None,
+            design=os.environ.get("HAMMER_AIRFLOW_DESIGN") or os.environ.get("design") or None,
+        )
+    except Exception as e:
+        warn(f"PD cache: could not re-store {stage_tag} under its new key ({e}); "
+             f"leaving the legacy entry in place.")
+        return
+    try:
+        pd_store.delete_stage_blob(legacy_key)
+        info(f"PD cache: moved {stage_tag} from legacy key {legacy_key[:16]}... "
+             f"to {new_key[:16]}...")
+    except Exception as e:
+        warn(f"PD cache: re-stored {stage_tag} under its new key but could not drop "
+             f"the legacy entry ({e}).")
 
 
 def _rebase_restored_paths(rundir_path: Path, output_filename: str,
@@ -465,6 +539,7 @@ def cache_or_run(
 
     short = key[:16]
 
+    legacy_key = None
     if force_local:
         # --local: skip the DB restore entirely and run the tool locally. We
         # still computed the key above and STILL store the fresh result below,
@@ -479,6 +554,8 @@ def cache_or_run(
             # of the saved time below).
             _restore_t0 = time.monotonic()
             blob = pd_store.load_stage_blob(key)
+            if blob is None:
+                legacy_key, blob = _legacy_lookup(driver, stage_tag, key, _info, _warn)
         except Exception as e:
             _warn(f"PD cache: lookup failed ({e}); running {stage_tag} normally.")
             return run_fn()
@@ -514,6 +591,8 @@ def cache_or_run(
                 module=module,
                 enabled=ledger_on,
             )
+            if legacy_key:
+                _migrate_blob(stage_tag, key, legacy_key, data, original_duration, original_cpu, _info, _warn)
             _info(
                 f"PD cache HIT for {stage_tag} (sha256={short}...). "
                 f"Restored {rundir_path}, skipping run."
@@ -679,6 +758,9 @@ def try_restore_from_cache(
         # time from before the fetch so the Postgres/network transfer counts
         _restore_t0 = time.monotonic()
         blob = pd_store.load_stage_blob(key)
+        legacy_key = None
+        if blob is None:
+            legacy_key, blob = _legacy_lookup(driver, stage_tag, key, _info, _warn)
     except Exception as e:
         _warn(f"PD cache (skip-path): lookup failed ({e}); not restoring.")
         return False
@@ -721,6 +803,8 @@ def try_restore_from_cache(
             module=module,
             enabled=ledger_on,
         )
+        if legacy_key:
+            _migrate_blob(stage_tag, key, legacy_key, data, original_duration, original_cpu, _info, _warn)
         _info(
             f"PD cache HIT (skip-path) for {stage_tag} (sha256={short}...). "
             f"stage_change_check said skip, local rundir was missing; "
