@@ -248,6 +248,66 @@ _STAGE_TOOL_ATTRS = {
 }
 
 
+def _normalize_obj_dir_paths(value: Any, obj_dir: str) -> Any:
+    """A copy of value with absolute paths under obj_dir rewritten to
+    <OBJ_DIR>/..., for hashing only. The same design built in two directories
+    must hash the same."""
+    if isinstance(value, str):
+        if value == obj_dir:
+            return "<OBJ_DIR>"
+        if value.startswith(obj_dir + "/"):
+            return "<OBJ_DIR>" + value[len(obj_dir):]
+        return value
+    if isinstance(value, list):
+        return [_normalize_obj_dir_paths(v, obj_dir) for v in value]
+    if isinstance(value, dict):
+        return {k: _normalize_obj_dir_paths(v, obj_dir) for k, v in value.items()}
+    return value
+
+
+_INPUT_HASH_LIMIT = 256 * 1024 * 1024
+
+
+def _stage_input_fingerprint(db: Dict[str, Any], stage_tag: str, obj_dir: str) -> str:
+    """sha256 over what a stage actually consumes from the build dir: the
+    upstream outputs named under <stage>.inputs.* that live under obj_dir.
+    Hashing their contents (not their paths) makes the key follow the data
+    across directories and notice an upstream rerun that left a different
+    file at the same path. Layout-sized files contribute size and mtime
+    instead of their bytes."""
+    import hashlib
+    import os
+    paths: List[str] = []
+
+    def walk(v: Any) -> None:
+        if isinstance(v, str):
+            if v.startswith(obj_dir + "/") and os.path.isfile(v):
+                paths.append(v)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                walk(x)
+        elif isinstance(v, dict):
+            for x in v.values():
+                walk(x)
+
+    for k, v in db.items():
+        if k.startswith(stage_tag + ".inputs"):
+            walk(v)
+    h = hashlib.sha256()
+    for p in sorted(set(paths)):
+        st = os.stat(p)
+        h.update(os.path.relpath(p, obj_dir).encode("utf-8"))
+        h.update(b"\0")
+        if st.st_size <= _INPUT_HASH_LIMIT:
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        else:
+            h.update(f"{st.st_size}:{int(st.st_mtime)}".encode("utf-8"))
+        h.update(b"\xff")
+    return h.hexdigest()
+
+
 def _build_cache_key(driver: Any, stage_tag: str) -> str:
     """Compute the stage cache key from the live driver config."""
     db_json = driver.database.get_database_json()
@@ -281,7 +341,72 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
     except Exception:
         pass
 
+    # The config names upstream outputs by absolute path inside the build dir.
+    # Hash what those files contain and hide where they sit, so the same
+    # design in another directory (or another user's workspace) gets the same
+    # key, and a changed upstream output at the same path gets a new one.
+    obj_dir = getattr(driver, "obj_dir", None)
+    if obj_dir:
+        obj_dir = os.path.normpath(str(obj_dir))
+        try:
+            db[f"vlsi.pd_cache.input_fingerprint.{stage_tag}"] = \
+                _stage_input_fingerprint(db, stage_tag, obj_dir)
+        except Exception:
+            pass
+        db = _normalize_obj_dir_paths(db, obj_dir)
+
     return pd_store.compute_stage_key(db, stage_tag)
+
+
+def _rebase_restored_paths(rundir_path: Path, output_filename: str,
+                           info=None, warn=None) -> int:
+    """Point a restored rundir's json outputs at the dir it was restored into.
+
+    A blob stored from one build dir carries that dir's absolute paths in its
+    output json. Restored somewhere else, the next stage would follow those
+    paths back into the original dir (whatever state it is in now), and the
+    collateral fingerprint would hash those out-of-dir inputs, so that stage
+    could never hit the cache either. Infer the original obj_dir from the
+    paths themselves -- the prefix before this rundir's own name -- and
+    rewrite it to the current obj_dir in every top-level json of the rundir.
+    Returns the number of files changed; on any trouble the rundir is left
+    exactly as restored.
+    """
+    import os
+    import re
+    info = info or (lambda msg: None)
+    warn = warn or (lambda msg: None)
+    try:
+        new_dir = str(rundir_path.parent)
+        name = rundir_path.name
+        out = rundir_path / output_filename
+        if not out.exists():
+            return 0
+        text = out.read_text()
+        prefixes: Dict[str, int] = {}
+        for m in re.finditer(r'"((?:/[^"/]+)+)/' + re.escape(name) + r'/', text):
+            prefixes[m.group(1)] = prefixes.get(m.group(1), 0) + 1
+        if not prefixes:
+            return 0
+        orig = max(prefixes, key=prefixes.get)
+        if orig == new_dir or os.path.realpath(orig) == os.path.realpath(new_dir):
+            return 0
+        # only whole-path matches: /a/build/ChipTop must not touch /a/build/ChipTop-iso
+        pat = re.compile(re.escape(orig) + r'(?=/|["\s,\]])')
+        changed = 0
+        for jf in rundir_path.glob("*.json"):
+            s = jf.read_text()
+            t = pat.sub(new_dir, s)
+            if t != s:
+                jf.write_text(t)
+                changed += 1
+        if changed:
+            info(f"PD cache: restored {name} was stored from {orig}; "
+                 f"rewrote {changed} json file(s) to {new_dir}")
+        return changed
+    except Exception as e:
+        warn(f"PD cache: could not rebase restored paths ({e}); leaving them as restored.")
+        return 0
 
 
 def cache_or_run(
@@ -368,6 +493,7 @@ def cache_or_run(
         try:
             rundir_path.parent.mkdir(parents=True, exist_ok=True)
             pd_store.untar_to_directory(data, rundir_path.parent)
+            _rebase_restored_paths(rundir_path, output_filename, _info, _warn)
             output_path = rundir_path / output_filename
             with output_path.open("r") as f:
                 output = json.load(f)
@@ -576,6 +702,7 @@ def try_restore_from_cache(
     try:
         rundir_path.parent.mkdir(parents=True, exist_ok=True)
         pd_store.untar_to_directory(data, rundir_path.parent)
+        _rebase_restored_paths(rundir_path, output_filename, _info, _warn)
         restore_seconds = time.monotonic() - _restore_t0
         saved = None
         saved_cpu = None
