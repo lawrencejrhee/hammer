@@ -1081,19 +1081,28 @@ def format_savings_report(events: List[Dict[str, Any]],
     lines.append(f"  SLEDGEHAMMER TIME SAVED:            {_pair(sledge_wall, sledge_cpu)}")
     lines.append(f"  Legacy-equivalent skips (no credit): {_pair(t['deplegacy_wall'], t['deplegacy_cpu'])}")
     lines.append(f"  Total skipped work (incl. legacy):  {_pair(total_saved_wall, total_saved_cpu)}")
-    lines.append(f"  Time that actually ran:             {_pair(t['ran_wall'], t['ran_cpu'])}")
+    # ran_wall is the sum of every stage's own tool time. Stages that ran side
+    # by side overlapped on the clock, so the wall time a person waited is that
+    # sum minus the overlap the parallel bucket measured. Legacy would have run
+    # the same stages back to back, so the sum itself is the sequential
+    # baseline; the overlap must not be added on top of it a second time.
+    elapsed_wall = max(0.0, t["ran_wall"] - par_wall)
+    lines.append(f"  Tool time executed (stage sum):     {_pair(t['ran_wall'], t['ran_cpu'])}")
+    if par_wall:
+        lines.append(f"  Wall clock elapsed (after overlap): wall {_format_duration(elapsed_wall)}")
     failed_s = airflow_failed_time()
     if failed_s:
         lines.append(f"  Failed-run time (not in any bucket): wall {_format_duration(failed_s)}"
                      f"  (from airflow; legacy would burn these failures too)")
     # Turnaround-time efficiency: the share of the legacy-equivalent schedule
-    # that sledgehammer removed. The baseline excludes skips legacy would have
-    # made anyway, so only sledgehammer-specific savings count.
-    tat_baseline = t["ran_wall"] + sledge_wall - t["deplegacy_wall"]
+    # that sledgehammer removed. The baseline is the stage sum plus the work
+    # the cache, dep-check and resume never ran, minus skips legacy would have
+    # made anyway; the actual is the elapsed wall clock.
+    tat_baseline = t["ran_wall"] + (sledge_wall - par_wall) - t["deplegacy_wall"]
     if tat_baseline > 0:
-        tat = 1.0 - (t["ran_wall"] / tat_baseline)
+        tat = 1.0 - (elapsed_wall / tat_baseline)
         lines.append(f"  TAT efficiency improvement:         {tat * 100:.1f}%"
-                     f"  ({_format_duration(t['ran_wall'])} ran vs {_format_duration(tat_baseline)} legacy-equivalent)")
+                     f"  ({_format_duration(elapsed_wall)} elapsed vs {_format_duration(tat_baseline)} legacy-equivalent)")
     # Same ratio on CPU time. Parallel execution contributes nothing here --
     # concurrency shortens the schedule without removing work -- so this
     # measures only the compute the cache and dep-check never spent.
