@@ -831,7 +831,7 @@ RocketTile design workflow (includes SRAM generation step).
 | `syn` | boolean | `True` | Run logic synthesis |
 | `par` | boolean | `True` | Run place and route |
 
-**Default config**: design=`demo2x2`, PDK=`techname`, tools=`cm`, env=`demo2x2`
+**Default config**: design=`example`, PDK=`sky130`, tools=`cm`, env=`example` — override with the `design`/`pdk`/`tools`/`env` environment variables, set to your site's names
 
 ### DAG Task Flow
 
