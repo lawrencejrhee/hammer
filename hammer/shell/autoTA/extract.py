@@ -1,3 +1,4 @@
+import os
 import re
 import sys
 from collections import defaultdict
@@ -74,12 +75,14 @@ def mask_pdk_info(text):
     (r'\bsky130\w*', 'PDK'),
     (r'\bsky\d+\w*', 'PDK'),
     (r'\bts\d+\w*', 'PDK'),
-    (r'\btechname\w*', 'PDK'),
     (r'\basap\d+\w*', 'PDK'),
     (r'\bsaed\d+\w*', 'PDK'),
     (r'/\w+/PDK/\w+', '/PDK/path'),
     (r'sky130_\w+_\w+', 'PDK_lib'),
   ]
+  # Vendor-specific name patterns stay out of the repository: supply them as a
+  # comma-separated list of regexes via AUTOTA_PDK_PATTERNS in the environment.
+  pdk_patterns += [(p, 'PDK') for p in os.environ.get('AUTOTA_PDK_PATTERNS', '').split(',') if p]
 
   result = text
   for pattern, replacement in pdk_patterns:

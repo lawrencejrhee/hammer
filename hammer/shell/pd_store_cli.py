@@ -1462,9 +1462,9 @@ def _build_parser() -> argparse.ArgumentParser:
         "smtp-setup",
         help="Configure the SMTP sender for completion emails (writes ~/.sledgehammer/smtp.env).",
     )
-    p_ss.add_argument("--user", default="berkeley.sledgehammer.studio@gmail.com",
+    p_ss.add_argument("--user", default=os.environ.get("SLEDGEHAMMER_SMTP_USER", ""),
                       help="SMTP account / sender address "
-                           "(default: the studio service account).")
+                           "(default: $SLEDGEHAMMER_SMTP_USER).")
     p_ss.add_argument("--host", default="smtp.gmail.com", help="SMTP host (default: smtp.gmail.com).")
     p_ss.add_argument("--port", default="587", help="SMTP port (default: 587).")
     p_ss.add_argument("--sender", help="From address if different from --user.")

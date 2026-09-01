@@ -46,13 +46,17 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 
-# BWRC ships its sram22 macros under one common root with one directory
-# per macro. Each directory has the LEF / lib / GDS / Verilog file we need.
-BWRC_SRAM22_ROOT = "/tools/commercial/skywater/local/sram22_sky130_macros"
+# The sram22 macros live under one common root with one directory per macro.
+# Each directory has the LEF / lib / GDS / Verilog file we need. Override the
+# default install root with the SRAM22_ROOT environment variable if your site
+# keeps the macros elsewhere.
+SRAM22_ROOT = os.environ.get(
+    "SRAM22_ROOT", "/tools/commercial/skywater/local/sram22_sky130_macros"
+)
 
 # sram22 names look like sram22_<depth>x<width>m<mux>w<wmask>, for example
 # sram22_256x32m4w8. We parse them out so the resolver can find the right
-# directory without the caller having to know the BWRC layout.
+# directory without the caller having to know the site layout.
 SRAM22_NAME_RE = re.compile(r"^sram22_(\d+)x(\d+)m(\d+)w(\d+)$")
 
 
@@ -309,14 +313,14 @@ class Sram22Info:
     mux: int            # the m# part of the name (column mux factor)
     wmask: int          # the w# part of the name (write mask granularity)
     addr_width: int     # log2(depth), needed for the blackbox stub
-    base_dir: Path      # macro's directory under BWRC_SRAM22_ROOT
+    base_dir: Path      # macro's directory under SRAM22_ROOT
     lef_file: Path
     lib_file: Path
     gds_file: Path
     verilog_sim: Path
 
 
-def resolve_sram22(name: str, sram22_root: str = BWRC_SRAM22_ROOT) -> Optional[Sram22Info]:
+def resolve_sram22(name: str, sram22_root: str = SRAM22_ROOT) -> Optional[Sram22Info]:
     """
     Turn a module name like sram22_64x32m4w8 into the paths Hammer needs.
 
@@ -579,7 +583,7 @@ def register_design(
     rtl_paths: List[Path],
     pdk: str = "sky130",
     out_dir: Optional[Path] = None,
-    sram22_root: str = BWRC_SRAM22_ROOT,
+    sram22_root: str = SRAM22_ROOT,
     exclude_patterns: Optional[List[str]] = None,
     use_default_excludes: bool = True,
 ) -> Tuple[Path, List[str]]:
@@ -738,7 +742,7 @@ def _emit_sky130_extras_yml(srams: List[Sram22Info]) -> str:
 
 def augment_existing_design(
     design_dir: Path,
-    sram22_root: str = BWRC_SRAM22_ROOT,
+    sram22_root: str = SRAM22_ROOT,
 ) -> Tuple[List[Sram22Info], List[str]]:
     """
     Read configs-design/<name>/common.yml, detect SRAMs in the listed RTL,
