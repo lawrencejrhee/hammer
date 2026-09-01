@@ -7,7 +7,7 @@ the real Airflow integration uses, so what you see here is what you'd get there.
 
 Run it:
 
-    cd /bwrcq/home/lawrencejrhee/hammer
+    cd <path-to-your-hammer-checkout>
     .venv/bin/python -m auth2fa.demo_app --port 8099
 
 Then open http://<this-host>:8099/ (tunnel the port if your browser is

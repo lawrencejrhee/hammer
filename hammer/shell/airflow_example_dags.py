@@ -1586,10 +1586,13 @@ hammer_dag_gcd = create_hammer_dag_gcd()
 class AIRFlow_rocket:
     def __init__(self, context=None, force: bool = False):
         # minimal flow configuration variables
-        self.design = os.getenv('design', 'demo2x2')
-        self.pdk = os.getenv('pdk', 'techname')
+        # Site-specific design/PDK names are supplied via environment variables
+        # (design, pdk, tools, env) so they never live in the repository;
+        # export them in the Airflow scheduler environment for your site.
+        self.design = os.getenv('design', 'example')
+        self.pdk = os.getenv('pdk', 'sky130')
         self.tools = os.getenv('tools', 'cm')
-        self.env = os.getenv('env', 'demo2x2')
+        self.env = os.getenv('env', 'example')
         self.extra = os.getenv('extra', '')  # extra configs
         self.args = os.getenv('args', '')  # command-line args (including step flow control)
         if force:
@@ -1608,20 +1611,20 @@ class AIRFlow_rocket:
             os.path.join(os.path.dirname(__file__), '..', '..', 'specs')
         )
         self.e2e_dir = os.getenv('e2e_dir', self.vlsi_dir)
-        self.specs_dir = os.getenv('specs_dir', self.specs_abs) #Point to specs directory for demo2x2 yml files
+        self.specs_dir = os.getenv('specs_dir', self.specs_abs) #Point to specs directory for the site's yml files
         self.OBJ_DIR = os.getenv('OBJ_DIR', f"{self.e2e_dir}/build-{self.pdk}-{self.tools}/{self.design}")
         
         # non-overlapping default configs
-        self.ENV_YML = os.getenv('ENV_YML', f"{self.specs_dir}/{self.env}-env.yml") #Point to demo2x2-env.yml
-        self.PDK_CONF = os.getenv('PDK_CONF', f"{self.specs_dir}/{self.env}-tech.yml") #Kind of confusing, but the pdk yml file is named demo2x2 instead of techname
+        self.ENV_YML = os.getenv('ENV_YML', f"{self.specs_dir}/{self.env}-env.yml") #Points to {env}-env.yml
+        self.PDK_CONF = os.getenv('PDK_CONF', f"{self.specs_dir}/{self.env}-tech.yml") #Kind of confusing, but the pdk yml file is named after the env, not the pdk
         self.TOOLS_CONF = os.getenv('TOOLS_CONF', f"{self.e2e_dir}/configs-tool/{self.tools}.yml") #Can keep the same for genus/innovus
 
         # design-specific overrides of default configs
-        self.DESIGN_CONF = os.getenv('DESIGN_CONF', f"{self.specs_dir}/{self.design}-design-common.yml") #Point to demo2x2-design-common.yml
-        self.DESIGN_PDK_CONF = os.getenv('DESIGN_PDK_CONF', f"{self.specs_dir}/rockettile-design.yml") #Point to rockettile-design.yml, which contains same info as syn.yml (demo2x2)
+        self.DESIGN_CONF = os.getenv('DESIGN_CONF', f"{self.specs_dir}/{self.design}-design-common.yml") #Points to {design}-design-common.yml
+        self.DESIGN_PDK_CONF = os.getenv('DESIGN_PDK_CONF', f"{self.specs_dir}/rockettile-design.yml") #Point to rockettile-design.yml, which contains same info as syn.yml
         
         # synthesis and par configurations
-        #self.SYN_CONF = os.getenv('SYN_CONF', f"{self.specs_dir}/rockettile-design.yml") #Point to rockettile-design.yml, which contains same info as syn.yml (demo2x2)
+        #self.SYN_CONF = os.getenv('SYN_CONF', f"{self.specs_dir}/rockettile-design.yml") #Point to rockettile-design.yml, which contains same info as syn.yml
         #self.PAR_CONF = os.getenv('PAR_CONF', f"{self.e2e_dir}/configs-design/{self.design}/par.yml")
         
         # This should be your target, build is passed in
