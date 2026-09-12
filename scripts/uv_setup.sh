@@ -1,10 +1,28 @@
 #!/usr/bin/env bash
 # From-scratch environment setup for Hammer + Airflow + Postgres under uv.
 # Run from a fresh clone:  ./scripts/uv_setup.sh
+#
+# Profiles
+#   (default)       The full SledgeHammer stack: Hammer, Airflow with LDAP auth,
+#                   the Postgres driver, sibling plugins. What the studio needs.
+#   SLEDGE_LAB=1    Hammer only. No Airflow, no Postgres driver, no LDAP, no
+#                   compiled extensions, no dev tooling, no prompts, and it
+#                   prefers the system python over a downloaded one. For
+#                   coursework where people run hammer-vlsi and nothing else.
+#                   On a fresh VM this finishes in well under a minute.
+#
+# Knobs (either profile)
+#   SLEDGE_NO_PLUGINS=1   skip the sibling hammer-*-plugin install loop
+#   SLEDGE_NO_LDAP=1      default profile only: skip python-ldap and the OpenLDAP
+#                         headers it needs. Airflow's LDAP login will not work.
+#   PYVER=3.11            python minor version the venv is built with
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO"
+
+_lab="${SLEDGE_LAB:-}"
+_no_ldap="${SLEDGE_NO_LDAP:-}"
 
 # Sanitize the build environment. psycopg2 and python-ldap compile from source
 # here; whatever OpenSSL / libpq is on the linker path gets baked into the
@@ -15,6 +33,9 @@ cd "$REPO"
 # (uv builds the venv with its own standalone Python, so the result is clean),
 # and -- as a catch-all for anything we did not anticipate -- verify at the end
 # that psycopg2 actually imports.
+#
+# The lab profile compiles nothing, but the same stray environments can still
+# shadow the python or the venv we are about to create, so it runs this too.
 _strip_pathlike() {   # $1 = the ':'-list; $2.. = glob patterns of entries to drop
     local list="$1"; shift
     local out="" p pat drop; local IFS=:
@@ -50,7 +71,7 @@ fi
 #    spack, a hand-set lib dir) can still carry a foreign OpenSSL. We do not
 #    strip it blindly (it may be intentional), but flag it so a later failure
 #    has an obvious first thing to try.
-if [ -n "${LD_LIBRARY_PATH:-}" ] \
+if [ -z "$_lab" ] && [ -n "${LD_LIBRARY_PATH:-}" ] \
    && printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -vqE '^(/usr/|/lib|/opt/dell|$)'; then
     echo "note: LD_LIBRARY_PATH has non-system entries below; if the build's psycopg2"
     echo "      check fails, 'unset LD_LIBRARY_PATH' and rerun:"
@@ -70,11 +91,16 @@ PYVER="${PYVER:-3.11}"
 
 step() { printf '\n=== %s ===\n' "$1"; }
 
+if [ -n "$_lab" ]; then
+    echo "profile: lab (SLEDGE_LAB=1): Hammer only, no Airflow / Postgres / LDAP"
+fi
+
 step "uv"
 command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 uv --version
 
+if [ -z "$_lab" ]; then
 step "pg_config (psycopg2 builds from source)"
 if [ ! -x "$PG_LOCAL/usr/bin/pg_config" ]; then
     tmp="$(mktemp -d)"
@@ -90,6 +116,9 @@ fi
 export PATH="$PG_LOCAL/usr/bin:$PATH"
 pg_config --version
 
+# The lab image ships libnsl system-wide (it is a Cadence runtime dependency
+# the VM template installs), so this private copy is only for machines where
+# you cannot dnf install.
 step "libnsl (Cadence tools on RHEL 9)"
 if [ ! -f "$LIBNSL_LOCAL/usr/lib64/libnsl.so.1" ]; then
     tmp="$(mktemp -d)"
@@ -101,6 +130,7 @@ if [ ! -f "$LIBNSL_LOCAL/usr/lib64/libnsl.so.1" ]; then
 fi
 ls "$LIBNSL_LOCAL/usr/lib64/libnsl.so.1"
 
+if [ -z "$_no_ldap" ]; then
 step "OpenLDAP headers (python-ldap builds from source)"
 if [ ! -f "$LDAP_LOCAL/usr/include/lber.h" ]; then
     tmp="$(mktemp -d)"
@@ -116,6 +146,7 @@ if [ ! -f "$LDAP_LOCAL/usr/include/lber.h" ]; then
     rm -rf "$tmp"
 fi
 ls "$LDAP_LOCAL/usr/include/lber.h"
+fi
 
 step "persist PATH in ~/.bashrc"
 grep -q 'pg_local/usr/bin' "$HOME/.bashrc" 2>/dev/null || \
@@ -130,13 +161,43 @@ sledgehammer() {
     ( cd "$repo" && source ./venv.sh && export PATH="$repo/.venv/bin:$PATH" && exec ./scripts/airflow-standalone-ldap.py "$@" )
 }
 EOF
+fi   # end of the default-profile-only prerequisites
 
 step "virtual environment + dependencies"
-uv python install "$PYVER"
-[ -d .venv ] || uv venv --python "$PYVER"
-uv lock
-uv sync --group dev
+if [ -n "$_lab" ]; then
+    # home is NFS and the venv lives on the local /scratch disk. uv's cache
+    # defaults to ~/.cache/uv (the NFS home), so hardlinking cache -> venv
+    # crosses filesystems, fails, and warns "Failed to hardlink ... degraded
+    # performance" on every file. Put the cache on the SAME disk as the venv so
+    # the hardlinks succeed: fast and quiet, and it needs no per-file copy.
+    export UV_CACHE_DIR="$REPO/.uv-cache"
+    # Prefer the distro interpreter when the requested minor version is already
+    # installed: it is patched by the distro rather than being one more private
+    # copy nobody updates, and it saves a ~30 MB download per person. Fall back
+    # to uv's standalone build when the system does not have it OR cannot run
+    # (e.g. a pyenv shim that exists but exits non-zero) -- make the venv build
+    # itself the test, not just "the file is executable".
+    if [ ! -d .venv ]; then
+        _syspy="$(command -v "python$PYVER" 2>/dev/null || true)"
+        if [ -n "$_syspy" ] && uv venv --python "$_syspy"; then
+            echo "  venv built on system interpreter $_syspy"
+        else
+            echo "  system python$PYVER absent or unusable; using uv's own build"
+            uv python install "$PYVER"
+            uv venv --python "$PYVER"
+        fi
+    fi
+    uv lock
+    # --no-dev: pytest, pyright, tox, Sphinx and pylint are not needed to run a flow.
+    uv sync --no-dev
+else
+    uv python install "$PYVER"
+    [ -d .venv ] || uv venv --python "$PYVER"
+    uv lock
+    uv sync --group dev
+fi
 
+if [ -z "$_lab" ]; then
 step "airflow $AIRFLOW_VERSION"
 source .venv/bin/activate
 PYTHON_VERSION="$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
@@ -148,9 +209,13 @@ uv pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "$CONSTRAINT"
 # so the newer deps it needs (pyjwt, common-compat, sqlalchemy) end up on top.
 uv pip install "apache-airflow-providers-edge3==${EDGE3_VERSION}" --constraint "$CONSTRAINT"
 uv pip install "apache-airflow-providers-fab==${FAB_VERSION}"
+if [ -z "$_no_ldap" ]; then
 CPPFLAGS="-I$LDAP_LOCAL/usr/include -I/usr/include ${CPPFLAGS:-}" \
 LDFLAGS="-L$LDAP_LOCAL/usr/lib64 -L/lib64 ${LDFLAGS:-}" \
     uv pip install "python-ldap==${LDAP_VERSION}" --no-binary python-ldap
+else
+    echo "  python-ldap skipped (SLEDGE_NO_LDAP set); Airflow's LDAP login will not work"
+fi
 # psycopg2 is not a base dependency (see pyproject.toml: it lives in the
 # "cache" extra so a plain hammer install needs no compiler). The studio
 # does need it, and needs it built here rather than as a wheel, so that the
@@ -174,6 +239,7 @@ else
     exit 1
 fi
 rm -f /tmp/_pg_err
+fi   # end of the default-profile-only Airflow / Postgres block
 
 step "hammer plugins (editable, any that sit next to this checkout)"
 # Tech/PDK plugins (techname*, mentor, etc.) are separate packages, not deps of
@@ -197,9 +263,45 @@ else
     echo "  skipped (SLEDGE_NO_PLUGINS set)"
 fi
 
+if [ -n "$_lab" ]; then
+step "verify hammer-vlsi runs"
+# Judged by its OUTPUT, not its exit status: hammer-vlsi looks up
+# hammer-shell-test by name, and when the venv's scripts are not on PATH it
+# prints one line to stderr and exits 0 having done nothing. So the exit code
+# proves nothing; the usage block does.
+# Judge the WHOLE output, not the first line. stderr is unbuffered and stdout is
+# block-buffered on a pipe, so a stray warning could otherwise become "line 1"
+# and fail a working install. grep for the usage line anywhere in the output.
+_out="$(PATH="$REPO/.venv/bin:$PATH" hammer-vlsi -h 2>&1 || true)"
+if printf '%s\n' "$_out" | grep -q '^usage: hammer-vlsi'; then
+    echo "  ok: $(printf '%s\n' "$_out" | grep -m1 '^usage:')"
+else
+    echo "ERROR: hammer-vlsi did not print its usage block." >&2
+    printf '  got: %s\n' "${_out:-<no output at all>}" >&2
+    exit 1
+fi
+
+step "persist PATH in ~/.bashrc"
+# Appended, never prepended: .venv/bin carries its own python, python3 and pip,
+# and putting it first would shadow the system ones for everything else.
+_venv_bin="$REPO/.venv/bin"
+if grep -qF "$_venv_bin" "$HOME/.bashrc" 2>/dev/null; then
+    echo "  already present"
+else
+    printf '\n# hammer-vlsi (SledgeHammer). Appended on purpose; see scripts/uv_setup.sh.\nexport PATH="$PATH:%s"\n' "$_venv_bin" >> "$HOME/.bashrc"
+    echo "  added to ~/.bashrc"
+fi
+fi
+
+if [ -z "$_lab" ]; then
 step "secrets (committed airflow.cfg ships blank; create the encrypted env)"
 if [ -f "$SECRETS_FILE" ]; then
     echo "already present: $SECRETS_FILE"
+elif [ ! -t 0 ]; then
+    # No terminal to answer a prompt from (a script, a provisioning hook, a CI
+    # job). Do not fail the whole install at the last step; say what to do.
+    echo "  no tty, skipping the secrets prompt. Airflow won't start until these exist."
+    echo "  create them later: ./scripts/sledge-secrets-create.sh"
 else
     read -rp "  set up Postgres secrets now? [Y/n]: " DO_SECRETS
     if [ "${DO_SECRETS,,}" = "n" ]; then
@@ -209,11 +311,24 @@ else
         "$REPO/scripts/sledge-secrets-create.sh"
     fi
 fi
+fi
 
 step "done"
+if [ -n "$_lab" ]; then
+cat <<EOF
+Hammer is installed in $REPO/.venv and its scripts are on PATH for new shells.
+For this shell:
+    export PATH="\$PATH:$REPO/.venv/bin"
+Check it works with:
+    hammer-vlsi -h
+If that prints nothing at all, PATH is wrong: hammer-vlsi exits 0 without doing
+anything when its scripts are off PATH. Silence is failure, not success.
+EOF
+else
 cat <<EOF
 Setup complete. Start Airflow with:
     source ./venv.sh && export PATH="\$(pwd)/.venv/bin:\$PATH"
     ./scripts/airflow-standalone-ldap.py
 (first launch runs the DB migrations automatically.)
 EOF
+fi

@@ -2232,7 +2232,7 @@ class CLIDriver:
         if output != "hammer-shell appears to be on the path":
             print("hammer-shell does not appear to be on the path (hammer-shell-test failed to run: %s)" % (output),
                   file=sys.stderr)
-            return 1
+            sys.exit(1)
 
         # Exit with the action's return code. Driver scripts call main() as
         # their last statement and discard its return value, so without this a
