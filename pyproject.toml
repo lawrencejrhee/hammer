@@ -21,6 +21,9 @@ dependencies = [
     "numpy>=1.23.0,<2",
     "sphinxcontrib-mermaid>=0.8.1,<0.9",
 ]
+# NOTE: the RTL fingerprint (hammer/vlsi/rtl_check.py) shells out to the `slang`
+# binary rather than importing pyslang, because pyslang does not bind slang's
+# ASTSerializer. scripts/uv_setup.sh installs it; rtl_check pins the version.
 
 [project.optional-dependencies]
 # The PD cache, ledger and studio CLI talk to Postgres. They are off by
