@@ -24,6 +24,12 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 #  cache.
 SLANG_VERSION = "11.0"
 
+#  Appended to every SlangNotFound message.
+_INSTALL_HINT = (
+    f"Install it with scripts/uv_setup.sh (it fetches slang {SLANG_VERSION} into "
+    f"tools/slang/slang), or set $SLANG_BIN to a slang {SLANG_VERSION} binary."
+)
+
 
 class RtlParseError(Exception):
     """Raised when slang reports an error while compiling the RTL."""
@@ -129,8 +135,11 @@ def _run_slang(paths: Sequence[str],
         # --diag-abs-paths: diagnostics land in build logs and in RtlParseError,
         # where slang's default CWD-relative "../../../../private/var/..." is
         # unreadable and depends on where the run started.
+        # Chipyard's generated RTL declares no `timescale; slang errors on a
+        # design that mixes elements with and without one, where VCS and Genus
+        # only warn. Applies only to elements that declare none.
         cmd = [binary, "-q", "--single-unit", "--ignore-unknown-modules",
-               "--diag-abs-paths",
+               "--diag-abs-paths", "--timescale", "1ns/1ps",
                "--ast-json-detailed-types", "--ast-json-source-info",
                "--ast-json", out_path]
         for d in include_dirs:
@@ -373,6 +382,14 @@ def digest_units(paths: Sequence[str],
 
     doc = _run_slang(real_paths, include_dirs, defines, top_module)
 
+    #  Without this, a document missing both keys hashes to a fixed constant via
+    #  the .get() defaults below, so every such design would share a fingerprint.
+    missing_keys = [k for k in ("design", "definitions") if k not in doc]
+    if missing_keys:
+        raise RtlParseError(real_paths[0] if real_paths else "<none>",
+                            f"slang's AST JSON has no {' or '.join(missing_keys)} key; "
+                            f"rtl_check is pinned to slang {SLANG_VERSION}.")
+
     index: Dict[str, Any] = {}
     _index_by_addr(doc, index)
 
@@ -386,6 +403,13 @@ def digest_units(paths: Sequence[str],
 
     # `definitions` carries the per-module settings that live outside the design
     # tree: `celldefine, `unconnected_drive, default net type and lifetime.
+    #  Same hazard: nothing elaborated means every such run shares one hash.
+    if not members:
+        raise RtlParseError(real_paths[0] if real_paths else "<none>",
+                            "the inputs elaborated to no design elements. Check "
+                            "synthesis.inputs.defines and top_module, and that the "
+                            "files are not all inside an inactive `ifdef.")
+
     payload = {"design": _canon(members, index, set()),
                "definitions": _canon(doc.get("definitions", []), index, set())}
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -411,8 +435,10 @@ def _warn_uncovered(paths: Sequence[str], covered: Set[str]) -> None:
     healthy-looking hash -- so say so.  Diagnostic only: this never raises and
     never touches a hash.
     """
+    #  Not `len(missing) != len(paths)`: that skips the warning when NOTHING was
+    #  covered, which is when it most needs saying.
     missing = [p for p in paths if p not in covered]
-    if missing and len(missing) != len(paths):
+    if missing:
         print(f"rtl_check: {len(missing)} of {len(paths)} input files contributed no "
               f"design units; check synthesis.inputs.top_module reaches them:",
               file=sys.stderr)
