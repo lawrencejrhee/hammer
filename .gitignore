@@ -21,6 +21,11 @@ __pycache__/
 
 wheels/
 
+# created by scripts/uv_setup.sh: the downloaded slang binary and the
+# SLEDGE_LAB=1 uv cache
+/tools/slang/
+/.uv-cache/
+
 chipyard/
 
 simple_auth_manager_passwords.json.generated
