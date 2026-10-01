@@ -14,13 +14,20 @@ technology.sky130:
   # This contains the Cadence PDK
   # this key is OPTIONAL, and is only required if you are running Pegasus DRC/LVS.
   sky130_cds: str
+  drc_deck: str
+  lvs_deck: str
+  pegasus_drc_rules_dir: Optional[str]
+
+  # Checkout of the cadence-skywater-130-pdk tapeout collateral repo (OPTIONAL)
+  misc_tapeout_collateral: Optional[str]
 
   # This contains the Cadence standard cell library
   # this key is OPTIONAL, and is only required if you want to do Voltus IR drop analysis.
   sky130_scl: str
 
   # RAM paths
-  # OpenRAM
+  sram22_sky130_macros: Optional[str]
+  # OpenRAM (no longer supported by the SRAM compiler)
   openram_lib: str
   # DFFRAM currently not supported
   dffram_lib:  Optional[str]
@@ -35,3 +42,6 @@ technology.sky130:
 
   # Choose between "sky130_fd_sc_hd" (open-source) or "sky130_scl" (Cadence) 
   stdcell_library: str
+
+  # Build the chip-level IO ring (read by chip drivers)
+  use_io_cells: bool

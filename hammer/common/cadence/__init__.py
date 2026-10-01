@@ -1,6 +1,7 @@
 from functools import reduce
 from typing import List, Optional, Dict, Any, Callable
 import os
+import re
 import json
 import copy
 import inspect
@@ -9,6 +10,15 @@ from hammer.vlsi import HammerTool, HasSDCSupport, HasCPFSupport, HasUPFSupport,
 from hammer.vlsi.constraints import MMMCCorner, MMMCCornerType
 from hammer.utils import optional_map, add_dicts, reduce_list_str, add_lists
 import hammer.tech as hammer_tech
+
+
+def _sdc_defines_clocks(path: str) -> bool:
+    """Whether an SDC file creates any clocks."""
+    try:
+        with open(path) as f:
+            return re.search(r"^\s*create_(generated_)?clock\b", f.read(), re.M) is not None
+    except OSError:
+        return False
 
 
 class CadenceTool(HasSDCSupport, HasCPFSupport, HasUPFSupport, TCLTool, HammerTool):
@@ -129,14 +139,25 @@ class CadenceTool(HasSDCSupport, HasCPFSupport, HasUPFSupport, TCLTool, HammerTo
         def append_mmmc(cmd: str) -> None:
             self.verbose_tcl_append(cmd, mmmc_output)
 
+        # Add the post-synthesis SDC, if present ("" means none).
+        post_synth_sdc = self.post_synth_sdc or None
+
         sdc_files = self.generate_sdc_files()
+
+        # A post-synthesis SDC that defines clocks (Genus writes them) replaces the
+        # Hammer-generated clock fragment, to avoid duplicate create_clock, and goes
+        # first so the pin fragment's -clock references resolve. One without clocks
+        # (for example from Yosys) keeps Hammer's clocks and the original order.
+        post_synth_has_clocks = post_synth_sdc is not None and _sdc_defines_clocks(post_synth_sdc)
+        if post_synth_has_clocks:
+            clock_fragment = os.path.join(self.run_dir, "clock_constraints_fragment.sdc")
+            sdc_files = [f for f in sdc_files if f != clock_fragment]
+            sdc_files.insert(0, post_synth_sdc)
 
         # Append any custom SDC files.
         sdc_files.extend(self.get_setting("vlsi.inputs.custom_sdc_files"))
 
-        # Add the post-synthesis SDC, if present.
-        post_synth_sdc = self.post_synth_sdc
-        if post_synth_sdc is not None:
+        if post_synth_sdc is not None and not post_synth_has_clocks:
             sdc_files.append(post_synth_sdc)
 
         # TODO: add floorplanning SDC

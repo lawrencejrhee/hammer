@@ -7,11 +7,6 @@ vlsi.core.formal_tool: "hammer.formal.conformal"
 vlsi.core.power_tool: "hammer.power.voltus"
 vlsi.core.drc_tool: "hammer.drc.pegasus"
 vlsi.core.lvs_tool: "hammer.lvs.pegasus"
-drc_deck_sources: # DRC decks, one element for each deck
-  - "/tools/commercial/skywater/sky130_cds/sky130_prelim_release_091123/pegasus/sky130_rev0006.drc.pvl"
-lvs_deck_sources: 
-  - "/tools/commercial/skywater/sky130_cds/sky130_prelim_release_091123/pegasus/sky130_rev0001.lvs.pvl"
-lvs_deck_sources_meta: lazysubst
-
-drc_blackbox_srams: false
-lvs_blackbox_srams: false
+# Pegasus decks come from technology.sky130.drc_deck / lvs_deck (release 0.1.0 names
+# under technology.sky130.sky130_cds). To pin other decks, set those keys (or
+# technology.sky130.drc_deck_sources) under technology.sky130 in a project config.

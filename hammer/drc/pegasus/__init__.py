@@ -151,9 +151,16 @@ class PegasusDRC(HammerDRCTool, CadenceTool):
         """
         v = dict(super().env_vars)
         v["PEGASUS_BIN"] = self.get_setting("drc.pegasus.pegasus_bin")
-        v["PEGASUS_DRC"] = os.path.join(
-            self.get_setting("technology.sky130.sky130_cds"), "Sky130_DRC"
-        )
+        # Only a tech that declares a Pegasus DRC rules dir exports PEGASUS_DRC;
+        # any other tech would otherwise fail here on a missing key.
+        try:
+            rules_dir = self.get_setting(
+                f"technology.{self.technology.name}.pegasus_drc_rules_dir"
+            )
+        except KeyError:
+            rules_dir = None
+        if rules_dir:
+            v["PEGASUS_DRC"] = rules_dir
         return v
 
     @property

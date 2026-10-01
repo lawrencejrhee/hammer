@@ -496,7 +496,10 @@ class InnovusTclToPythonConverter:
                     i += 1
                     continue
                 
-                if i + 1 >= len(parts) or parts[i + 1].startswith('-'):
+                # A following token that is a negative number (-start_offset -0.200)
+                # is this flag's value, not another flag.
+                if i + 1 >= len(parts) or (parts[i + 1].startswith('-')
+                                           and not re.fullmatch(r'-(\d+\.?\d*|\.\d+)', parts[i + 1])):
                     if flag_name in self.RESERVED_KEYWORDS:
                         flag_name = f'_option_{flag_name}'
                     named_args[flag_name] = True
@@ -1600,6 +1603,12 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
                         else:
                             area_str = " ".join(("-area", str(const.x), str(const.y), str(const.x+const.width), str(const.y+const.height)))
                             self.verbose_append(f"add_fillers -density {const.density} {area_str}")
+                    else:
+                        # a density target without an area applies to the whole core
+                        if self.use_python:
+                            self.py_append(f"add_fillers(density={const.density})")
+                        else:
+                            self.verbose_append(f"add_fillers -density {const.density}")
                 if len(self.get_decap_constraints()) == 0:
                     if self.use_python:
                         self.py_append("add_fillers()")
