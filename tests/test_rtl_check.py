@@ -57,3 +57,86 @@ class TestEmptyInputs:
                 ])
             assert cm.value.code == 0
         assert not c.log_contains("fingerprint")
+
+
+@pytest.fixture
+def slang() -> None:
+    """Skip unless the pinned slang is reachable ($SLANG_BIN, PATH or tools/slang)."""
+    try:
+        rtl_check._checked_binary()
+    except rtl_check.SlangNotFound as e:
+        pytest.skip(f"needs slang {rtl_check.SLANG_VERSION}: {e}")
+
+
+TOP_SV = """\
+module leaf(input logic clk, input logic d, output logic q);
+  always_ff @(posedge clk) q <= d;
+endmodule
+
+module top(input logic clk, input logic d, output logic q);
+  logic mid;
+  leaf u0(.clk(clk), .d(d), .q(mid));
+  leaf u1(.clk(clk), .d(mid), .q(q));
+endmodule
+"""
+
+
+class TestRealFingerprint:
+    def test_hierarchy_and_edits(self, tmp_path, slang) -> None:
+        rtl = tmp_path / "top.sv"
+        rtl.write_text(TOP_SV)
+        first, units = rtl_check.digest_files([str(rtl)], top_module="top")
+        assert units and first != EMPTY_FINGERPRINT
+        assert rtl_check.digest_files([str(rtl)], top_module="top")[0] == first
+        # comments and whitespace are not design changes
+        rtl.write_text("// a comment\n" + TOP_SV.replace("q <= d;", "q <= d;  "))
+        assert rtl_check.digest_files([str(rtl)], top_module="top")[0] == first
+        # logic is
+        rtl.write_text(TOP_SV.replace("q <= d;", "q <= ~d;"))
+        assert rtl_check.digest_files([str(rtl)], top_module="top")[0] != first
+
+    def test_bad_top_module(self, tmp_path, slang) -> None:
+        rtl = tmp_path / "top.sv"
+        rtl.write_text(TOP_SV)
+        with pytest.raises(rtl_check.RtlParseError):
+            rtl_check.digest_files([str(rtl)], top_module="no_such_module")
+
+    def test_non_regular_file(self) -> None:
+        # rejected before slang is looked up, so no slang needed
+        with pytest.raises(FileNotFoundError):
+            rtl_check.digest_files([os.devnull])
+
+    def test_missing_slang(self, tmp_path, monkeypatch) -> None:
+        rtl = tmp_path / "top.sv"
+        rtl.write_text(TOP_SV)
+        monkeypatch.setenv("SLANG_BIN", str(tmp_path / "no_slang_here"))
+        with pytest.raises(rtl_check.SlangNotFound):
+            rtl_check.digest_files([str(rtl)], top_module="top")
+
+    def test_driver_stores_fingerprint(self, tmpdir, slang) -> None:
+        rtl = os.path.join(tmpdir, "top.sv")
+        with open(rtl, "w") as f:
+            f.write(TOP_SV)
+        os.mkdir(os.path.join(tmpdir, "mock"))  # mocksynth writes its outputs here
+        cfg = os.path.join(tmpdir, "cfg.json")
+        with open(cfg, "w") as f:
+            json.dump({
+                "vlsi.core.technology": "hammer.technology.nop",
+                "vlsi.core.synthesis_tool": "hammer.synthesis.mocksynth",
+                "synthesis.inputs.top_module": "top",
+                "synthesis.inputs.input_files": [rtl],
+                "synthesis.mocksynth.temp_folder": os.path.join(tmpdir, "mock"),
+            }, f)
+        obj = os.path.join(tmpdir, "obj")
+        with pytest.raises(SystemExit) as cm:
+            CLIDriver().main(args=[
+                "syn",
+                "-p", cfg,
+                "--obj_dir", obj,
+                "--syn_rundir", os.path.join(tmpdir, "syn"),
+                "--log", os.path.join(tmpdir, "log.txt"),
+            ])
+        assert cm.value.code == 0
+        with open(os.path.join(obj, "master_database.json")) as f:
+            stored = json.load(f)["vlsi.rtl_fingerprint_sha256"]
+        assert stored == rtl_check.digest_files([rtl], top_module="top")[0]
