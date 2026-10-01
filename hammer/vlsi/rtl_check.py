@@ -381,11 +381,6 @@ def digest_units(paths: Sequence[str],
             seen_paths.add(real)
             real_paths.append(real)
 
-    #  synthesis.inputs.input_files defaults to [], so every action that lists no
-    #  RTL (sram_generator, a par/drc/lvs config without synthesis inputs) lands
-    #  here.  slang given no files fails with "no input files", which aborted the
-    #  action; the digest of nothing is what the pre-slang fingerprint returned.
-    #  Adding RTL later still changes the fingerprint.
     if not real_paths:
         return sha256_hex(b""), []
 

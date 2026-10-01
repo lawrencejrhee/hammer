@@ -1,5 +1,3 @@
-#  Tests for hammer.vlsi.rtl_check, the slang-based RTL fingerprint
-
 import hashlib
 import json
 import os
@@ -9,9 +7,6 @@ import pytest
 from hammer.logging.test import HammerLoggingCaptureContext
 from hammer.vlsi import CLIDriver, pd_store, rtl_check
 
-# The fingerprint of no RTL: the hash of an empty manifest, as before slang. It has to
-# stay a fixed value that needs no slang, because synthesis.inputs.input_files
-# defaults to [] and every action that lists no RTL computes it.
 EMPTY_FINGERPRINT = hashlib.sha256(b"").hexdigest()
 
 
@@ -31,14 +26,10 @@ class TestEmptyInputs:
         assert rtl_check.digest_files([])[0] == EMPTY_FINGERPRINT
 
     def test_cache_key_agrees(self, monkeypatch) -> None:
-        # pd_cache falls back to pd_store.compute_rtl_fingerprint, which must give the
-        # same value cli_driver stores.
         monkeypatch.setattr(rtl_check, "_run_slang", _slang_must_not_run)
         assert pd_store.compute_rtl_fingerprint([]) == EMPTY_FINGERPRINT
 
     def test_action_without_rtl_runs(self, tmpdir, monkeypatch) -> None:
-        # Chipyard runs sram_generator with no synthesis inputs; it used to abort in
-        # the fingerprint ("error: no input files") before the tool ran.
         monkeypatch.setattr(rtl_check, "_run_slang", _slang_must_not_run)
         cfg = os.path.join(tmpdir, "cfg.json")
         with open(cfg, "w") as f:
@@ -88,10 +79,8 @@ class TestRealFingerprint:
         first, units = rtl_check.digest_files([str(rtl)], top_module="top")
         assert units and first != EMPTY_FINGERPRINT
         assert rtl_check.digest_files([str(rtl)], top_module="top")[0] == first
-        # comments and whitespace are not design changes
         rtl.write_text("// a comment\n" + TOP_SV.replace("q <= d;", "q <= d;  "))
         assert rtl_check.digest_files([str(rtl)], top_module="top")[0] == first
-        # logic is
         rtl.write_text(TOP_SV.replace("q <= d;", "q <= ~d;"))
         assert rtl_check.digest_files([str(rtl)], top_module="top")[0] != first
 
@@ -102,7 +91,6 @@ class TestRealFingerprint:
             rtl_check.digest_files([str(rtl)], top_module="no_such_module")
 
     def test_non_regular_file(self) -> None:
-        # rejected before slang is looked up, so no slang needed
         with pytest.raises(FileNotFoundError):
             rtl_check.digest_files([os.devnull])
 
@@ -117,7 +105,7 @@ class TestRealFingerprint:
         rtl = os.path.join(tmpdir, "top.sv")
         with open(rtl, "w") as f:
             f.write(TOP_SV)
-        os.mkdir(os.path.join(tmpdir, "mock"))  # mocksynth writes its outputs here
+        os.mkdir(os.path.join(tmpdir, "mock"))
         cfg = os.path.join(tmpdir, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({

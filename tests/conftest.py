@@ -1,17 +1,19 @@
-#  SledgeHammer test configuration
-
 import hashlib
 import os
 
 import pytest
 
+from hammer.logging import HammerVLSILogging
 from hammer.vlsi import rtl_check
 
-# The upstream CLI-driver and flowgraph tests give placeholder files (/dev/null, LICENSE,
-# README.md) as synthesis inputs. The pre-slang RTL fingerprint byte-hashed them; slang
-# rejects them, which failed these 14 tests. They exercise the driver, not the
-# fingerprint (tests/test_rtl_check.py covers that), so they get the pre-slang byte hash,
-# which still changes when an input changes, and the upstream files stay unmodified.
+
+@pytest.fixture(autouse=True)
+def _restore_logging_callbacks():
+    saved = list(HammerVLSILogging.callbacks)
+    yield
+    HammerVLSILogging.callbacks = saved
+
+
 _PLACEHOLDER_RTL_TEST_MODULES = {"test_cli_driver", "test_flowgraph"}
 
 

@@ -17,6 +17,9 @@ import textwrap
 
 class PegasusLVS(HammerLVSTool, CadenceTool):
 
+    _pegasus_completed = True
+    _pegasus_exit_status = 0
+
     def tool_config_prefix(self) -> str:
         return "lvs.pegasus"
 
@@ -27,7 +30,11 @@ class PegasusLVS(HammerLVSTool, CadenceTool):
         return []
 
     def fill_outputs(self) -> bool:
-        return True
+        return self._pegasus_completed
+
+    def handle_errors(self, output: str, code: int) -> bool:
+        self._pegasus_exit_status = code
+        return False
 
     # TODO: placeholder empty step
     def empty_step(self) -> bool:
@@ -65,13 +72,23 @@ class PegasusLVS(HammerLVSTool, CadenceTool):
             "-ui_data"  # for results viewer
             ] + rules
 
+        if os.path.exists(self.lvs_results_file):
+            os.remove(self.lvs_results_file)
+        self._pegasus_exit_status = 0
+
         HammerVLSILogging.enable_colour = False
         HammerVLSILogging.enable_tag = False
-        self.run_executable(args, cwd=self.run_dir)  # TODO: check for errors and deal with them
+        self.run_executable(args, cwd=self.run_dir)
         HammerVLSILogging.enable_colour = True
         HammerVLSILogging.enable_tag = True
 
-        # TODO: check that lvs run was successful
+        self._pegasus_completed = (self._pegasus_exit_status == 0
+                                   and os.path.isfile(self.lvs_results_file))
+        if not self._pegasus_completed:
+            self.logger.error(
+                f"Pegasus LVS did not complete (exit status {self._pegasus_exit_status}, "
+                f"results file {'written' if os.path.isfile(self.lvs_results_file) else 'missing'}); "
+                f"see {os.path.join(self.run_dir, self.top_module + '_logs')}")
 
         # Create view_lvs script & design review macro script file
         # See the README for how this works
@@ -91,7 +108,7 @@ class PegasusLVS(HammerLVSTool, CadenceTool):
         PVS::invoke_pvsrv("{self.run_dir}");
         '''))
 
-        return True
+        return self._pegasus_completed
 
     def generate_lvs_ctl_file(self) -> bool:
         """ Generate the LVS control file self.lvs_ctl_file and fill its contents """
