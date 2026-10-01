@@ -365,7 +365,8 @@ def digest_units(paths: Sequence[str],
         costs no re-run, exactly as Genus would never synthesize it.  When
         omitted slang infers every uninstantiated module as a top, which is a
         legitimately wider set, so the two modes give different fingerprints.
-    :return: (overall fingerprint, per-unit digests sorted by key)
+    :return: (overall fingerprint, per-unit digests sorted by key).  No inputs
+        give the digest of nothing and no units, without running slang.
     :raises FileNotFoundError: an input file is missing.
     :raises SlangNotFound: the pinned slang binary is missing or the wrong version.
     :raises RtlParseError: slang reported a parse or elaboration error.
@@ -379,6 +380,14 @@ def digest_units(paths: Sequence[str],
         if real not in seen_paths:
             seen_paths.add(real)
             real_paths.append(real)
+
+    #  synthesis.inputs.input_files defaults to [], so every action that lists no
+    #  RTL (sram_generator, a par/drc/lvs config without synthesis inputs) lands
+    #  here.  slang given no files fails with "no input files", which aborted the
+    #  action; the digest of nothing is what the pre-slang fingerprint returned.
+    #  Adding RTL later still changes the fingerprint.
+    if not real_paths:
+        return sha256_hex(b""), []
 
     doc = _run_slang(real_paths, include_dirs, defines, top_module)
 
