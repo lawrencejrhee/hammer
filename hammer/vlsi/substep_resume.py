@@ -149,7 +149,7 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
             with open(log, errors="ignore") as fh:
                 for line in fh:
                     m = pat.search(line)
-                    if m and m.group(1) not in names:
+                    if m:
                         names.append(m.group(1))
         except OSError:
             continue
@@ -157,7 +157,7 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
         if names and log_name in _INFER_COMPLETION and target != "pre_" + names[-1]:
             names = names[:-1]
         for n in names:
-            if n not in announced:
+            if n not in announced and n != "dummy_step":
                 announced.append(n)
     present = [n for n in announced if _checkpoint_present(rundir, n)]
 
