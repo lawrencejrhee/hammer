@@ -253,12 +253,14 @@ source .venv/bin/activate
 PYTHON_VERSION="$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 CONSTRAINT="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
 uv pip uninstall myst-parser mdit-py-plugins markdown-it-py >/dev/null 2>&1 || true
-uv pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "$CONSTRAINT"
+# Airflow 3 also opens an asyncpg engine on a Postgres metadata DB.
+uv pip install "apache-airflow==${AIRFLOW_VERSION}" "asyncpg>=0.30.0,<1" --constraint "$CONSTRAINT"
 # Edge worker support (constrained so it can't drag airflow to a newer release).
 # Installed BEFORE fab: fab is deliberately unconstrained and must resolve last
 # so the newer deps it needs (pyjwt, common-compat, sqlalchemy) end up on top.
 uv pip install "apache-airflow-providers-edge3==${EDGE3_VERSION}" --constraint "$CONSTRAINT"
-uv pip install "apache-airflow-providers-fab==${FAB_VERSION}"
+# SQLAlchemy 2.1 breaks sqlalchemy-utils, which Airflow imports.
+uv pip install "apache-airflow-providers-fab==${FAB_VERSION}" "sqlalchemy>=2.0.16,<2.1"
 if [ -z "$_no_ldap" ]; then
 CPPFLAGS="-I$LDAP_LOCAL/usr/include -I/usr/include ${CPPFLAGS:-}" \
 LDFLAGS="-L$LDAP_LOCAL/usr/lib64 -L/lib64 ${LDFLAGS:-}" \
@@ -272,6 +274,7 @@ fi
 # libraries sanitized above are the ones baked into it.
 uv pip install "psycopg2==2.9.11" --no-binary psycopg2 --reinstall
 AIRFLOW_HOME="$(mktemp -d)" airflow version
+AIRFLOW_HOME="$(mktemp -d)" python3 -c "import airflow.providers.fab.auth_manager.fab_auth_manager"
 
 step "verify the compiled build is clean (no foreign library baked in)"
 # The real safety net: whatever environment we failed to strip above, a
@@ -289,6 +292,7 @@ else
     exit 1
 fi
 rm -f /tmp/_pg_err
+python3 -c "import asyncpg" || { echo "ERROR: asyncpg is missing; Airflow 3 needs it for a Postgres metadata DB." >&2; exit 1; }
 
 step "put 'sledgehammer' on PATH (~/.local/bin)"
 # A link to this one command, so the venv's python and pip do not shadow the system's.

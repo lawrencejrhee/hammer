@@ -29,9 +29,9 @@ From a fresh clone, one command builds the environment:
 It neutralizes conda/mamba/any active venv first (psycopg2 and python-ldap
 compile from source, and a foreign OpenSSL on the linker path gets baked in as
 an RPATH that breaks them in every later shell), creates the venv, runs
-`uv sync --group dev`, then installs Airflow and its fab/edge3 providers
-against the official constraint file and builds psycopg2 and python-ldap with
-`--no-binary`.
+`uv sync --group dev`, then installs Airflow, asyncpg and the edge3 provider
+against the official constraint file, the fab provider on top with SQLAlchemy
+held to 2.0.x, and builds psycopg2 and python-ldap with `--no-binary`.
 
 It also links `sledgehammer` into `~/.local/bin`. Open a new shell and it runs
 from any directory, inside a Chipyard tree or not, with nothing sourced. The
