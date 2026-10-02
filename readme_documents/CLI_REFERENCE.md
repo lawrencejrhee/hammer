@@ -33,6 +33,14 @@ an RPATH that breaks them in every later shell), creates the venv, runs
 against the official constraint file and builds psycopg2 and python-ldap with
 `--no-binary`.
 
+It also links `sledgehammer` into `~/.local/bin`. Open a new shell and it runs
+from any directory, inside a Chipyard tree or not, with nothing sourced. The
+link points at the checkout that ran the script last. If you set up before
+this change, rerun `./scripts/uv_setup.sh` and open a new shell: it removes the
+old `sledgehammer()` function from `~/.bashrc` (which shadowed this command and
+refused to run inside Chipyard) and keeps a backup in
+`~/.bashrc.sledgehammer.bak`.
+
 **Do not run `uv sync` on its own afterwards.** Airflow is installed outside
 the lock, so a bare sync uninstalls it. To refresh just this package:
 

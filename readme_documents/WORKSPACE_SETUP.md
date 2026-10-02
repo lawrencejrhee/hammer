@@ -15,8 +15,9 @@ git clone git@github.com:lawrencejrhee/hammer.git hammer
 # 3. Build it -- one command, no manual pip
 ./hammer/scripts/uv_setup.sh
 
-# 4. Use it
-source hammer/.venv/bin/activate
+# 4. Use it (open a new shell first)
+source hammer/.venv/bin/activate    # needed for make buildfile
+sledgehammer syn                    # works from any directory
 ```
 
 Notes:

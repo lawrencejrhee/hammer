@@ -188,15 +188,29 @@ step "persist PATH in ~/.bashrc"
 grep -q 'pg_local/usr/bin' "$HOME/.bashrc" 2>/dev/null || \
     printf '\nexport PATH="$HOME/.local/bin:$HOME/pg_local/usr/bin:$PATH"\n' >> "$HOME/.bashrc"
 
-step "install 'sledgehammer' launch command in ~/.bashrc"
-grep -q 'sledgehammer()' "$HOME/.bashrc" 2>/dev/null || cat >> "$HOME/.bashrc" <<'EOF'
-
-sledgehammer() {
-    local repo; repo="$(git rev-parse --show-toplevel 2>/dev/null)"
-    [ -n "$repo" ] && [ -f "$repo/scripts/airflow-standalone-ldap.py" ] || { echo "sledgehammer: cd into a hammer checkout first"; return 1; }
-    ( cd "$repo" && source ./venv.sh && export PATH="$repo/.venv/bin:$PATH" && exec ./scripts/airflow-standalone-ldap.py "$@" )
-}
-EOF
+step "remove the old 'sledgehammer' shell function from ~/.bashrc"
+# It shadowed the real command; only the block this script used to write is removed.
+if grep -q '^sledgehammer() {$' "$HOME/.bashrc" 2>/dev/null; then
+    _rc_tmp="$(mktemp)"
+    awk '
+        /^sledgehammer\(\) \{$/ { blk = $0; inblk = 1; next }
+        inblk { blk = blk "\n" $0
+                if ($0 == "}") { if (blk !~ /airflow-standalone-ldap\.py/) print blk; inblk = 0 }
+                next }
+        { print }
+        END { if (inblk) print blk }
+    ' "$HOME/.bashrc" > "$_rc_tmp"
+    if cmp -s "$_rc_tmp" "$HOME/.bashrc"; then
+        echo "  a different sledgehammer() is defined there; left alone, but it shadows the real command"
+    else
+        cp "$HOME/.bashrc" "$HOME/.bashrc.sledgehammer.bak"
+        cat "$_rc_tmp" > "$HOME/.bashrc"
+        echo "  removed (backup: ~/.bashrc.sledgehammer.bak); open a new shell or run: unset -f sledgehammer"
+    fi
+    rm -f "$_rc_tmp"
+else
+    echo "  none found"
+fi
 fi   # end of the default-profile-only prerequisites
 
 step "virtual environment + dependencies"
@@ -275,6 +289,13 @@ else
     exit 1
 fi
 rm -f /tmp/_pg_err
+
+step "put 'sledgehammer' on PATH (~/.local/bin)"
+# A link to this one command, so the venv's python and pip do not shadow the system's.
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$REPO/.venv/bin/sledgehammer" "$HOME/.local/bin/sledgehammer"
+"$HOME/.local/bin/sledgehammer" --help >/dev/null
+echo "  $HOME/.local/bin/sledgehammer -> $REPO/.venv/bin/sledgehammer"
 fi   # end of the default-profile-only Airflow / Postgres block
 
 step "hammer plugins (editable, any that sit next to this checkout)"
@@ -362,9 +383,9 @@ anything when its scripts are off PATH. Silence is failure, not success.
 EOF
 else
 cat <<EOF
-Setup complete. Start Airflow with:
-    source ./venv.sh && export PATH="\$(pwd)/.venv/bin:\$PATH"
-    ./scripts/airflow-standalone-ldap.py
-(first launch runs the DB migrations automatically.)
+Setup complete. Open a new shell, then start the stack from any directory with:
+    sledgehammer
+(first launch runs the DB migrations automatically.) Run flows with
+'sledgehammer syn', 'sledgehammer par', ..., inside or outside Chipyard.
 EOF
 fi

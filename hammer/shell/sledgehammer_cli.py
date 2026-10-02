@@ -101,9 +101,28 @@ _STAGES = ("sim_rtl", "power_rtl", "syn", "sim_syn", "timing_syn", "formal_syn",
            "power_par", "drc", "lvs")
 
 
+_FOREIGN_LIB_MARKERS = ("conda", "miniforge", "mamba", "pixi")
+
+
+def _airflow_env():
+    """os.environ minus conda-style LD_LIBRARY_PATH entries, whose libcrypto breaks psycopg2."""
+    env = dict(os.environ)
+    ld = env.get("LD_LIBRARY_PATH")
+    if ld:
+        prefix = (env.get("CONDA_PREFIX") or "").rstrip("/")
+        keep = [p for p in ld.split(os.pathsep)
+                if p and not any(m in p.lower() for m in _FOREIGN_LIB_MARKERS)
+                and not (prefix and (p == prefix or p.startswith(prefix + "/")))]
+        if keep:
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(keep)
+        else:
+            del env["LD_LIBRARY_PATH"]
+    return env
+
+
 def _airflow(*a, capture=True):
     r = subprocess.run([_venv_bin("airflow"), *a],
-                       capture_output=capture, text=True)
+                       capture_output=capture, text=True, env=_airflow_env())
     return r.returncode, (r.stdout or ""), (r.stderr or "")
 
 
@@ -510,12 +529,14 @@ def main() -> int:
     if sub in LAUNCH_WORDS:
         # Branded launch: LDAP + 2FA on by default; SLEDGE_2FA=0 opts out.
         os.environ.setdefault("SLEDGE_2FA", "1")
-        cmd = [sys.executable, LAUNCHER] + args[1:]
+        # venv.sh sets up the BWRC tool environment that the workers inherit.
+        cmd = ["bash", "-c", 'cd "$1" && source ./venv.sh && exec "$2" "$3" "${@:4}"',
+               "sledgehammer", REPO, sys.executable, LAUNCHER] + args[1:]
         if os.environ.get("SLEDGE_DRYRUN"):
             print(f"[dryrun] launch  SLEDGE_2FA={os.environ['SLEDGE_2FA']} "
                   f"AIRFLOW_HOME={os.environ['AIRFLOW_HOME']}  ->  {' '.join(cmd)}")
             return 0
-        os.execv(sys.executable, cmd)
+        os.execvp("bash", cmd)
 
     # Otherwise pass straight through to the airflow CLI, secrets loaded first.
     cmd = [_venv_bin("airflow")] + args
@@ -524,7 +545,7 @@ def main() -> int:
               f"(secrets loaded)  ->  {' '.join(cmd)}")
         return 0
     _load_secrets()
-    os.execv(cmd[0], cmd)
+    os.execve(cmd[0], cmd, _airflow_env())
 
 
 if __name__ == "__main__":
