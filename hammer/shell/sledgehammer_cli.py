@@ -552,7 +552,8 @@ def main() -> int:
         # Branded launch: LDAP + 2FA on by default; SLEDGE_2FA=0 opts out.
         os.environ.setdefault("SLEDGE_2FA", "1")
         # venv.sh sets up the BWRC tool environment that the workers inherit.
-        cmd = ["bash", "-c", 'cd "$1" && source ./venv.sh && exec "$2" "$3" "${@:4}"',
+        cmd = ["bash", "-c", 'cd "$1" && shift && _sledgehammer_argv=("$@") && set -- && '
+               'source ./venv.sh && exec "${_sledgehammer_argv[@]}"',
                "sledgehammer", REPO, sys.executable, LAUNCHER] + args[1:]
         if os.environ.get("SLEDGE_DRYRUN"):
             print(f"[dryrun] launch  SLEDGE_2FA={os.environ['SLEDGE_2FA']} "
