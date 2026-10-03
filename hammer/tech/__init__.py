@@ -356,7 +356,7 @@ class HammerTechnology:
                 if "file" in field_name or "path" in field_name or field_name == "verilog_sim":
                     # check if that file exists in cache, override if so
                     default_path = getattr(lib, field_name)
-                    if not default_path:
+                    if not isinstance(default_path, str) or not default_path:
                         continue
                     new_path = default_path
                     fname = os.path.basename(default_path)
