@@ -12,9 +12,13 @@ import os
 # This lives here rather than in a site-packages .pth shim on purpose: it's
 # version-controlled, survives package reinstalls, and stays scoped to the web
 # app -- a .pth would also import ldap into every DAG-task subprocess.
-import ldap  # noqa: F401  (python-ldap)
-import ldap.dn  # noqa: F401
-import ldap.filter  # noqa: F401
+try:
+    import ldap  # noqa: F401  (python-ldap)
+    import ldap.dn  # noqa: F401
+    import ldap.filter  # noqa: F401
+    _ldap_error = None
+except ImportError as _ldap_import_error:
+    _ldap_error = _ldap_import_error
 
 from flask_appbuilder.security.manager import AUTH_LDAP
 
@@ -57,6 +61,9 @@ AUTH_LDAP_BIND_PASSWORD = ""
 import logging as _logging
 import getpass as _getpass
 _wl_log = _logging.getLogger("airflow.webserver_config")
+if _ldap_error is not None:
+    _wl_log.error("python-ldap is unavailable (%s); the api-server runs, but every LDAP login is refused.",
+                  _ldap_error)
 
 # Whoever launched the server (the OS user) is always allowed -- they own it and
 # shouldn't be able to lock themselves out -- as is anyone in AIRFLOW_ALLOWED_UIDS.
