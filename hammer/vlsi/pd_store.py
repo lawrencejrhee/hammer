@@ -2236,13 +2236,17 @@ def materialize_checkpoint(rec: Dict[str, Any], rundir: Path) -> Path:
 def delete_checkpoints(stage_key: Optional[str] = None, design: Optional[str] = None,
                        stage: Optional[str] = None, module: Optional[str] = None,
                        ids: Optional[List[int]] = None,
-                       older_than_days: Optional[float] = None) -> int:
-    """Delete checkpoint rows by key, design/stage/module, ids, or age.
+                       older_than_days: Optional[float] = None,
+                       step: Optional[str] = None) -> int:
+    """Delete checkpoint rows by key, design/stage/module, step, ids, or age.
     Returns row count."""
     where, params = [], []  # type: List[str], List[Any]
     if stage_key is not None:
         where.append("stage_key = %s")
         params.append(stage_key)
+    if step is not None:
+        where.append("step = %s")
+        params.append(step)
     if design is not None:
         where.append("design = %s")
         params.append(design)

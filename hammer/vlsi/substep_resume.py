@@ -38,7 +38,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 MARKER_NAME = ".substep_resume.json"
 ENABLE_ENV_VAR = "HAMMER_SUBSTEP_RESUME"
@@ -108,7 +108,8 @@ def _checkpoint_present(rundir: str, step: str) -> bool:
         return False
 
 
-def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]:
+def confirmed_checkpoints(rundir: str, log_name: str = "genus.log",
+                          since: Optional[float] = None) -> List[str]:
     """Step names whose pre_<step> checkpoint the tool confirmed writing, in
     log order, filtered to checkpoints still present with content.
 
@@ -123,7 +124,8 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
     own log, but the checkpoints proven by earlier attempts are still on disk
     and still valid (a stage-key change deletes them, so presence plus the
     marker key check is sufficient). The result is ordered by checkpoint
-    mtime, oldest first, which is completion order."""
+    mtime, oldest first, which is completion order. With ``since``, only logs
+    and checkpoints modified after that time count."""
     pat = _CONFIRM_RE.get(log_name)
     if pat is None:
         return []
@@ -144,6 +146,8 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
             return 0.0
     announced: List[str] = []  # first-seen announced order, oldest log first
     for log in sorted(cands, key=_log_mtime):
+        if since is not None and _log_mtime(log) <= since:
+            continue
         names: List[str] = []
         try:
             with open(log, errors="ignore") as fh:
@@ -160,6 +164,8 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
             if n not in announced and n != "dummy_step":
                 announced.append(n)
     present = [n for n in announced if _checkpoint_present(rundir, n)]
+    if since is not None:
+        present = [n for n in present if _ck_mtime(rundir, n) > since]
 
     # completion order: checkpoint mtime, announced order as the tiebreak
     # (synthetic same-second writes, coarse filesystems)
@@ -170,6 +176,22 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log") -> List[str]
             mt = 0.0
         return (mt, announced.index(n))
     return sorted(present, key=_ck_key)
+
+
+def _ck_mtime(rundir: str, step: str) -> float:
+    try:
+        return os.path.getmtime(os.path.join(rundir, "pre_" + step))
+    except OSError:
+        return 0.0
+
+
+def _made_progress(rundir: str, log_name: str) -> bool:
+    """Whether the last attempt confirmed a new checkpoint, timed against the marker it wrote just before running."""
+    try:
+        started = os.path.getmtime(_marker_path(rundir))
+    except OSError:
+        return False
+    return bool(confirmed_checkpoints(rundir, log_name, since=started))
 
 
 def announced_order(rundir: str, log_name: str = "genus.log") -> List[str]:
@@ -411,7 +433,8 @@ def clear_checkpoint_db(driver: Any, stage_tag: str,
         return 0
 
 
-def _db_fallback_plan(driver: Any, stage_tag: str, rundir: str) -> Optional[Dict[str, Any]]:
+def _db_fallback_plan(driver: Any, stage_tag: str, rundir: str,
+                      skip: Sequence[str] = ()) -> Optional[Dict[str, Any]]:
     """No usable local checkpoint: try the database. Downloads the newest
     checkpoint stored for this exact stage key and materializes it into the
     rundir. The row's existence is its trust: it was log-confirmed and
@@ -427,6 +450,8 @@ def _db_fallback_plan(driver: Any, stage_tag: str, rundir: str) -> Optional[Dict
         if rec is None:
             return None
         step = rec["step"]
+        if step in skip:
+            return None
         # anti-loop: if the previous attempt already resumed from this very
         # checkpoint and confirmed nothing new, don't fetch it again
         marker = read_marker(rundir)
@@ -518,9 +543,8 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
         # a resume that produced no new confirmed checkpoint made no progress:
         # burn that rung so we step down the ladder instead of looping
         last = marker.get("resumed_from")
-        if last is not None and confirmed and confirmed[-1] == last:
-            if last not in burned:
-                burned.append(last)
+        if last is not None and last not in burned and not _made_progress(rundir, log_name):
+            burned.append(last)
         candidates = [c for c in confirmed if c not in burned]
         # The ceiling is positional in ANNOUNCED (step) order, which survives
         # both a burned ceiling step and mixed-generation rundirs, where an
@@ -532,8 +556,16 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
             allowed = set(announced[: announced.index(ceiling) + 1])
             candidates = [c for c in candidates if c in allowed]
         if not candidates:
+            # the database still holds the burned rungs (pushed after each failure); drop them so they are not fetched again
+            if burned and _db_enabled(driver):
+                try:
+                    from hammer.vlsi import pd_store
+                    for s in burned:
+                        pd_store.delete_checkpoints(stage_key=key, step=s)
+                except Exception:
+                    pass
             clean_checkpoints(rundir)
-            return _db_fallback_plan(driver, stage_tag, rundir)
+            return _db_fallback_plan(driver, stage_tag, rundir, skip=burned)
         step = candidates[-1]
         # measured time of the completed steps, from checkpoint mtimes: the
         # span from the first confirmed boundary to the resume point. This is
