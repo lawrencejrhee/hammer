@@ -200,6 +200,7 @@ class CLIDriver:
         # automatic substep resume defers to explicit flow control.
         self._explicit_flow_control = False
         self._explicit_start_step = None  # type: Optional[str]  # type: bool
+        self._explicit_start_given = False
         self.force_local = False  # type: bool  # --local: skip the DB cache pull
         self.synthesis_action: CLIActionConfigType
         # If a subclass has defined these, don't clobber them in init
@@ -759,7 +760,7 @@ class CLIDriver:
                                 f"Checkpoint pre_{self._explicit_start_step} fetched "
                                 "from the database for the requested start step.")
                     resume_plan = None
-                    if self.force_rerun:
+                    if self.force_rerun and not self._explicit_start_given:
                         # force means recompute: stale checkpoints must not
                         # seed a resume of the run after this one either
                         substep_resume.clean_checkpoints(driver.syn_tool.run_dir)
@@ -945,7 +946,7 @@ class CLIDriver:
                                 f"Checkpoint pre_{self._explicit_start_step} fetched "
                                 "from the database for the requested start step.")
                     par_resume_plan = None
-                    if self.force_rerun:
+                    if self.force_rerun and not self._explicit_start_given:
                         substep_resume.clean_checkpoints(driver.par_tool.run_dir)
                     if not self.force_rerun and not self._explicit_flow_control:
                         par_resume_plan = substep_resume.plan_resume(
@@ -1904,6 +1905,7 @@ class CLIDriver:
             # remember an inclusive start (from_step/only_step): the stage
             # branches validate that its checkpoint actually exists
             self._explicit_start_step = only_step or from_step
+            self._explicit_start_given = start_step is not None
             driver.set_post_custom_syn_tool_hooks(HammerTool.make_start_stop_hooks(
                 HammerStartStopStep(step=start_step, inclusive=start_incl),
                 HammerStartStopStep(step=stop_step, inclusive=stop_incl)))
