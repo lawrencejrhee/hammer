@@ -146,6 +146,9 @@ def _run_slang(paths: Sequence[str],
             cmd += ["-I", d]
         for d in defines:
             cmd += ["-D", d]
+        # Genus and Yosys predefine SYNTHESIS, and only syn and later stages use this fingerprint.
+        if not any(d.split("=", 1)[0] == "SYNTHESIS" for d in defines):
+            cmd += ["-D", "SYNTHESIS"]
         if top_module:
             cmd += ["--top", top_module]
         cmd += list(paths)
