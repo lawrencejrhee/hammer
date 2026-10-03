@@ -454,6 +454,9 @@ synthesis.inputs:
   defines: [] # Define options passed when reading HDL
   # type: List[str]
 
+  include_dirs: [] # Directories searched for `include files when reading HDL
+  # type: List[str]
+
   top_module: null # Top RTL module.
   # Set to null to not specify from the JSON.
 

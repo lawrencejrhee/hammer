@@ -620,21 +620,23 @@ class CLIDriver:
                     defines = []
                     if driver.database.has_setting("synthesis.inputs.defines"):
                         defines = list(driver.database.get_setting("synthesis.inputs.defines", nullvalue=[]))
+                    include_dirs = list(driver.database.get_setting("synthesis.inputs.include_dirs", nullvalue=[]))
                     top_module = None
                     if driver.database.has_setting("synthesis.inputs.top_module"):
                         top_module = driver.database.get_setting(
                             "synthesis.inputs.top_module", nullvalue=None)
-                    overall_sha256, _units = rtl_check.digest_files(
-                        rtl_inputs, defines=defines, top_module=top_module)
+                    overall_sha256, fallback = rtl_check.digest_or_bytes(
+                        rtl_inputs, include_dirs=include_dirs, defines=defines, top_module=top_module)
+                    if fallback:
+                        driver.log.warning(
+                            f"RTL fingerprint fell back to a byte hash because {fallback}\n"
+                            "Comment and whitespace edits now count as RTL changes, and files "
+                            "pulled in by `include are not covered. Install slang "
+                            f"{rtl_check.SLANG_VERSION} with scripts/uv_setup.sh or set $SLANG_BIN "
+                            "to restore the elaborated-design fingerprint.")
                     driver.database.set_setting("vlsi.rtl_fingerprint_sha256", overall_sha256)
             except FileNotFoundError as e:
                 driver.log.error(f"RTL file not found: {e.filename}")
-                return None
-            except rtl_check.RtlParseError as e:
-                driver.log.error(f"Failed to parse RTL for fingerprinting:\n{e.report}")
-                return None
-            except rtl_check.SlangNotFound as e:
-                driver.log.error(f"Cannot fingerprint RTL: {e}")
                 return None
             except Exception as e:
                 driver.log.error(f"Failed to compute RTL fingerprint: {e}")

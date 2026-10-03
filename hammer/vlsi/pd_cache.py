@@ -336,8 +336,10 @@ def _build_cache_key(driver: Any, stage_tag: str, legacy: bool = False) -> str:
         defines = db.get("synthesis.inputs.defines") or []
         defines = [d for d in defines if isinstance(d, str)]
         top_module = db.get("synthesis.inputs.top_module")
+        include_dirs = [d for d in db.get("synthesis.inputs.include_dirs") or [] if isinstance(d, str)]
         db["vlsi.rtl_fingerprint_sha256"] = pd_store.compute_rtl_fingerprint(
-            rtl_files, defines, top_module=top_module if isinstance(top_module, str) else None)
+            rtl_files, defines, top_module=top_module if isinstance(top_module, str) else None,
+            include_dirs=include_dirs)
 
     # Collateral edits (LEF/lib files named by path) are covered by
     # vlsi.collateral_fingerprint_sha256, stored as a setting in cli_driver so

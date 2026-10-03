@@ -143,7 +143,7 @@ def _run_slang(paths: Sequence[str],
                "--ast-json-detailed-types", "--ast-json-source-info",
                "--ast-json", out_path]
         for d in include_dirs:
-            cmd += ["-I", d]
+            cmd += ["-I", d, "--isystem", d]
         for d in defines:
             cmd += ["-D", d]
         # Genus and Yosys predefine SYNTHESIS, and only syn and later stages use this fingerprint.
@@ -460,6 +460,37 @@ def digest_files(paths: Sequence[str],
     """Backwards-compatible alias for :func:`digest_units`."""
     return digest_units(paths, include_dirs=include_dirs, defines=defines,
                         top_module=top_module)
+
+
+def byte_digest(paths: Sequence[str],
+                defines: Sequence[str] = (),
+                top_module: Optional[str] = None) -> str:
+    """Fallback fingerprint over the files' bytes, tagged so it never equals a slang digest."""
+    file_hashes = []
+    for path in paths:
+        if not os.path.isfile(path):
+            raise FileNotFoundError(2, "No such file or directory", path)
+        with open(path, "rb") as f:
+            file_hashes.append(sha256_hex(f.read()))
+    payload = json.dumps({"files": sorted(file_hashes), "defines": sorted(defines),
+                          "top_module": top_module}, sort_keys=True)
+    return "bytes:" + sha256_hex(payload.encode("utf-8"))
+
+
+def digest_or_bytes(paths: Sequence[str],
+                    include_dirs: Sequence[str] = (),
+                    defines: Sequence[str] = (),
+                    top_module: Optional[str] = None) -> Tuple[str, Optional[str]]:
+    """The slang digest, or the byte fallback plus the reason when slang is missing or rejects the RTL."""
+    try:
+        return digest_units(paths, include_dirs=include_dirs, defines=defines,
+                            top_module=top_module)[0], None
+    except SlangNotFound as e:
+        return byte_digest(paths, defines, top_module), f"slang is unavailable ({e})"
+    except RtlParseError as e:
+        return byte_digest(paths, defines, top_module), f"slang could not parse the RTL:\n{e.report}"
+    except RecursionError:
+        return byte_digest(paths, defines, top_module), "the elaborated design nests too deeply to fingerprint"
 
 
 # ── Output ──────────────────────────────────────────────────────────────────

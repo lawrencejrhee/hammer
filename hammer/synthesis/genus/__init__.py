@@ -269,6 +269,10 @@ class Genus(HammerSynthesisTool, CadenceTool):
             hammer_tech.filters.verilog_synth_filter
         ], hammer_tech.HammerTechnologyUtils.to_plain_item)
 
+        include_dirs = [os.path.join(os.getcwd(), d) for d in self.get_setting("synthesis.inputs.include_dirs", [])]
+        if include_dirs:
+            verbose_append("set_db init_hdl_search_path {{ {} }}".format(" ".join(include_dirs)))
+
         # Read the RTL.
         verbose_append("read_hdl {DEFINES} -sv {{ {FILES} }}".format(
             DEFINES=" ".join(["-define "+define for define in self.get_setting("synthesis.inputs.defines",[])]),

@@ -238,8 +238,10 @@ class YosysSynth(HammerSynthesisTool, OpenROADTool, TCLTool):
             hammer_tech.filters.verilog_synth_filter
         ], hammer_tech.HammerTechnologyUtils.to_plain_item)
 
+        include_flags = "".join(f" -I{os.path.join(os.getcwd(), d)}"
+                                for d in self.get_setting("synthesis.inputs.include_dirs", []))
         for verilog_file in abspath_input_files:
-            self.append(f"read_verilog -sv {verilog_file}")
+            self.append(f"read_verilog -sv{include_flags} {verilog_file}")
 
         liberty_files = self.technology.read_libs([hammer_tech.filters.timing_lib_with_ecsm_filter], hammer_tech.HammerTechnologyUtils.to_plain_item)
         for lib_file in liberty_files:

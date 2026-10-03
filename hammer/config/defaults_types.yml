@@ -208,6 +208,9 @@ synthesis.inputs:
   # Input files.
   input_files: list[str]
 
+  # Directories searched for `include files when reading HDL.
+  include_dirs: list[str]
+
   # Top RTL module.
   top_module: Optional[str]
 
