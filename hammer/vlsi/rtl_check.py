@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -387,6 +388,43 @@ def digest_units(paths: Sequence[str],
     if not real_paths:
         return sha256_hex(b""), []
 
+    return _with_deep_stack(_digest_real_paths, real_paths, include_dirs, defines, top_module)
+
+
+_DEEP_RECURSION_LIMIT = 200_000
+_DEEP_STACK_BYTES = 256 * 1024 * 1024
+
+
+def _with_deep_stack(fn: Any, *args: Any) -> Any:
+    """Run fn on a thread with a large stack and recursion limit, since slang's AST JSON can nest thousands of levels deep."""
+    result: Dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            result["value"] = fn(*args)
+        except BaseException as e:
+            result["error"] = e
+
+    old_limit = sys.getrecursionlimit()
+    old_stack = threading.stack_size()
+    try:
+        sys.setrecursionlimit(max(old_limit, _DEEP_RECURSION_LIMIT))
+        threading.stack_size(_DEEP_STACK_BYTES)
+        worker = threading.Thread(target=target, name="rtl_check")
+        worker.start()
+        worker.join()
+    finally:
+        threading.stack_size(old_stack)
+        sys.setrecursionlimit(old_limit)
+    if "error" in result:
+        raise result["error"]
+    return result["value"]
+
+
+def _digest_real_paths(real_paths: List[str],
+                       include_dirs: Sequence[str],
+                       defines: Sequence[str],
+                       top_module: Optional[str]) -> Tuple[str, List[DesignUnit]]:
     doc = _run_slang(real_paths, include_dirs, defines, top_module)
 
     #  Without this, a document missing both keys hashes to a fixed constant via
