@@ -1,10 +1,18 @@
-source ./.venv/bin/activate
+_sledge_repo="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-# Set AIRFLOW_HOME to current directory (Hammer root)
-export AIRFLOW_HOME=$(pwd)
-
-# Ensure uv and pg_config are on PATH
+# Ensure uv and pg_config are on PATH, behind the venv activated next
 export PATH="$HOME/pg_local/usr/bin:$HOME/.local/bin:$PATH"
+
+if [ ! -f "$_sledge_repo/.venv/bin/activate" ]; then
+    echo "[sledge] no venv at $_sledge_repo/.venv; run scripts/uv_setup.sh" >&2
+    unset _sledge_repo
+    return 1
+fi
+source "$_sledge_repo/.venv/bin/activate"
+
+# Set AIRFLOW_HOME to this checkout (Hammer root)
+export AIRFLOW_HOME="$_sledge_repo"
+unset _sledge_repo
 
 # Source BWRC environment for EDA tools (VCS, Genus, Innovus, etc.)
 if [ -f /tools/C/ee290-sp25/bwrc-env.sh ]; then
