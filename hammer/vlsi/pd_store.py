@@ -279,6 +279,7 @@ def _pg_settings() -> Dict[str, Any]:
         1. HAMMER_PG_* environment variables
         2. sql_alchemy_conn from airflow.cfg
         3. Hardcoded defaults
+        4. Password only: libpq's own PGPASSWORD or pgpass file ($PGPASSFILE, else ~/.pgpass)
     """
     cfg = _parse_airflow_cfg_conn()
     try:
@@ -309,19 +310,26 @@ def _pg_settings() -> Dict[str, Any]:
         os.environ.get("HAMMER_PG_PASSWORD")
         or cfg.get("password")
     )
-    if not password:
-        raise RuntimeError(
-            "No Postgres password found. Set HAMMER_PG_PASSWORD in the "
-            "environment, or ensure airflow.cfg's sql_alchemy_conn "
-            "contains a password."
-        )
-    return {
+    settings: Dict[str, Any] = {
         "host": host,
         "port": port,
         "dbname": dbname,
         "user": user,
-        "password": password,
     }
+    if password:
+        settings["password"] = password
+        return settings
+    if os.environ.get("PGPASSWORD"):
+        return settings
+    pgpass = os.environ.get("PGPASSFILE") or os.path.join(os.path.expanduser("~"), ".pgpass")
+    if os.path.isfile(pgpass):
+        settings["passfile"] = pgpass
+        return settings
+    raise RuntimeError(
+        "No Postgres password found. Set HAMMER_PG_PASSWORD in the "
+        "environment, ensure airflow.cfg's sql_alchemy_conn "
+        "contains a password, or add a ~/.pgpass entry."
+    )
 
 
 def _connect():
