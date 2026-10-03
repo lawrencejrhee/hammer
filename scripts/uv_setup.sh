@@ -280,18 +280,16 @@ step "verify the compiled build is clean (no foreign library baked in)"
 # The real safety net: whatever environment we failed to strip above, a
 # tainted psycopg2 shows up here as an import error. Fail loudly with the fix
 # instead of leaving a broken venv that only breaks later, at first DB use.
-if python3 -c "import psycopg2" 2>/tmp/_pg_err; then
+if _pg_msg="$(python3 -c "import psycopg2" 2>&1)"; then
     echo "  psycopg2 imports clean"
 else
     echo "ERROR: psycopg2 was built against a foreign library and cannot load:" >&2
-    sed 's/^/  /' /tmp/_pg_err >&2
+    printf '%s\n' "$_pg_msg" | sed 's/^/  /' >&2
     echo "  This means an environment was active that put a foreign OpenSSL/libpq" >&2
     echo "  on the linker path. Check for a conda/venv/module/spack environment or" >&2
     echo "  a non-system LD_LIBRARY_PATH, clear it, and rerun this script." >&2
-    rm -f /tmp/_pg_err
     exit 1
 fi
-rm -f /tmp/_pg_err
 python3 -c "import asyncpg" || { echo "ERROR: asyncpg is missing; Airflow 3 needs it for a Postgres metadata DB." >&2; exit 1; }
 
 step "put 'sledgehammer' on PATH (~/.local/bin)"
