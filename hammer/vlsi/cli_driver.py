@@ -723,7 +723,7 @@ class CLIDriver:
 
             if action_type == "synthesis" or action_type == "syn":
                 print(driver.obj_dir)
-                if self.force_rerun or self._explicit_flow_control or driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json"):
+                if driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun or self._explicit_flow_control):
                     if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
                         driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
                         return None
@@ -793,7 +793,8 @@ class CLIDriver:
                             driver.syn_tool.get_tool_hooks() + \
                             driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
                             list(extra_hooks or [])),
-                        force_local=self.force_local,
+                        force_local=self.force_local or self.force_rerun,
+                        store=not self._explicit_flow_control,
                         )
                     except BaseException:
                         # a killed or crashed tool unwinds as an exception and
@@ -903,7 +904,7 @@ class CLIDriver:
                                 )
                     return 0
             elif action_type == "par":
-                if self.force_rerun or self._explicit_flow_control or driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json"):
+                if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun or self._explicit_flow_control):
                     if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
                         driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
                         return None
@@ -969,7 +970,8 @@ class CLIDriver:
                             driver.par_tool.get_tool_hooks() + \
                             driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
                             list(extra_hooks or [])),
-                        force_local=self.force_local,
+                        force_local=self.force_local or self.force_rerun,
+                        store=not self._explicit_flow_control,
                         )
                     except BaseException:
                         try:
@@ -1059,7 +1061,7 @@ class CLIDriver:
                                 )
                     return 0
             elif action_type == "drc":
-                if self.force_rerun or driver.database.stage_change_check(stage = "drc", filename = driver.obj_dir + "/master_database.json"):
+                if driver.database.stage_change_check(stage = "drc", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun):
                     if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):
                         driver.database.revert_rerun(stage = "drc", filename = driver.obj_dir + "/master_database.json")
                         return None
@@ -1085,7 +1087,7 @@ class CLIDriver:
                 else:
                     return 0
             elif action_type == "lvs":
-                if self.force_rerun or driver.database.stage_change_check(stage = "lvs", filename = driver.obj_dir + "/master_database.json"):
+                if driver.database.stage_change_check(stage = "lvs", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun):
                     if not driver.load_lvs_tool(get_or_else(self.lvs_rundir, "")):
                         driver.database.revert_rerun(stage = "lvs", filename = driver.obj_dir + "/master_database.json")
                         return None
@@ -2217,7 +2219,8 @@ class CLIDriver:
         parser.add_argument("--only_step", dest="only_step", required=False,
                             help="Run only the given step. Not compatible with --{start|stop}_{before|after}_step.")
         parser.add_argument("--force", dest="force", default=False, action='store_true',
-                            help='Force rerun even if dependency check finds no changes.')
+                            help='Rerun even if the dependency check finds no changes: skip the PD cache lookup, '
+                                 'overwrite the cache entry, and mark later stages to rerun.')
         parser.add_argument("--local", dest="local", default=False, action='store_true',
                             help='Run locally: do NOT pull cached results from the PD store (DB). '
                                  'Dependency checks still apply (use --force to skip those).')

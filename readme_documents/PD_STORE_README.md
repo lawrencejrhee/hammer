@@ -25,7 +25,8 @@ decision on theirs.
   management.
 * An opt-in cache wrapper around `driver.run_synthesis` and `driver.run_par`
   in `cli_driver.py`. With `HAMMER_PD_CACHE=1`, syn or par will skip the
-  tool and untar a stored result if one matches.
+  tool and untar a stored result if one matches. `--force` (and `--local`)
+  skip that lookup, run the tool and overwrite the entry for the key.
 * Permission gating through a single Postgres group role
   (`sledgehammer_users`). Members can read and write the cache. Anyone
   outside the group can't connect to the tables.

@@ -37,6 +37,39 @@ class TestAirflowEnv:
         assert seen["env"]["LD_LIBRARY_PATH"] == "/usr/lib64"
 
 
+class TestRunForce:
+    def _trigger(self, tmp_path, monkeypatch, args, dag_text="'forceall': Param(default=False)"):
+        import getpass
+        dags = tmp_path / "dags"
+        dags.mkdir()
+        (dags / f"sledgehammer_Top_{getpass.getuser()}.py").write_text(dag_text)
+        calls = []
+
+        def fake_airflow(*a, capture=True):
+            calls.append(a)
+            return 0, "", ""
+
+        monkeypatch.setattr(sledgehammer_cli, "_airflow", fake_airflow)
+        monkeypatch.setattr(sledgehammer_cli, "_dags_folder", lambda: (str(dags), "test"))
+        assert sledgehammer_cli._cmd_run(args + ["--obj_dir", str(tmp_path / "Top"), "--no-wait"]) == 0
+        trigger = next(c for c in calls if c[:2] == ("dags", "trigger"))
+        return json.loads(trigger[trigger.index("-c") + 1])
+
+    def test_force_sends_redo_for_the_named_stages(self, tmp_path, monkeypatch) -> None:
+        assert self._trigger(tmp_path, monkeypatch, ["par", "--force"]) == {"par": True, "redo": True}
+
+    def test_forceall_forces_every_stage(self, tmp_path, monkeypatch) -> None:
+        assert self._trigger(tmp_path, monkeypatch, ["par", "--forceall"]) == {"par": True, "redo": True, "forceall": True}
+
+    def test_force_on_an_old_dag_warns(self, tmp_path, monkeypatch, capsys) -> None:
+        self._trigger(tmp_path, monkeypatch, ["par", "--force"], dag_text="old dag")
+        assert "predates per-stage --force" in capsys.readouterr().out
+
+    def test_force_on_a_new_dag_does_not_warn(self, tmp_path, monkeypatch, capsys) -> None:
+        self._trigger(tmp_path, monkeypatch, ["par", "--force"])
+        assert "predates" not in capsys.readouterr().out
+
+
 @pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") is None, reason="needs bash")
 def test_launch_sources_venv_sh_from_the_checkout_and_forwards_args(tmp_path, monkeypatch) -> None:
     repo = tmp_path / "hammer"

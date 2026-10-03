@@ -26,6 +26,10 @@ Flow commands -- hammer's flags, the DAG as plumbing, no GUI required:
       The Makefile target names work verbatim: <stage>, <stage>-<module>,
       and redo-<stage>[-<module>]. Run from the vlsi directory and
       --obj_dir is inferred from the Makefile, exactly as make did.
+  sledgehammer par --force
+      Rerun par even if nothing changed (redo-par is the same); stages before
+      it still rerun only if they changed. --forceall reruns every stage the
+      run executes.
 
   sledgehammer status --design Top          latest run, per-task table
   sledgehammer runs --design Top            recent runs
@@ -267,6 +271,15 @@ def _dag_obj_dir(dag_file):
     return None
 
 
+def _dag_supports_forceall(dag_file):
+    """True if the generated DAG forces per stage (it knows the 'forceall' Param)."""
+    try:
+        with open(dag_file) as f:
+            return "forceall" in f.read()
+    except OSError:
+        return True
+
+
 def _dag_for_cwd(dags_folder, user):
     """(design, obj_dir) for a registered DAG whose OBJ_DIR is under the cwd.
 
@@ -334,7 +347,10 @@ def _cmd_run(args) -> int:
                    help="restrict to these modules (hierarchical flows)")
     # hammer's --force; --redo is the DAG conf key and stays as an alias
     p.add_argument("--force", "--redo", dest="force", action="store_true",
-                   help="rerun even if the dependency check finds no changes")
+                   help="rerun the named stages even if nothing changed; "
+                        "earlier stages keep their normal check")
+    p.add_argument("--forceall", "--redo-all", dest="forceall", action="store_true",
+                   help="rerun every stage this run executes, earlier ones included")
     p.add_argument("--local", action="store_true",
                    help="do not pull cached results from the PD store")
     p.add_argument("--workspace")
@@ -398,8 +414,14 @@ def _cmd_run(args) -> int:
     conf = {s: True for s in actions}
     if a.module:
         conf["modules"] = a.module
-    if a.force:
+    if a.force or a.forceall:
         conf["redo"] = True
+    if a.forceall:
+        conf["forceall"] = True
+    if a.force and not a.forceall and not _dag_supports_forceall(dag_file):
+        print(f"[sledgehammer] {dag_file} predates per-stage --force, so it still forces "
+              f"every stage this run executes; regenerate it (make buildfile) to force "
+              f"only {' '.join(actions)}.")
     if a.local:
         conf["local"] = True
     if a.workspace:

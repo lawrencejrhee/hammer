@@ -779,11 +779,9 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             if extra_flags and str(extra_flags) != "None":
                 cmd += extra_flags
 
-            # Per-run modifiers (force_local / redo). The 'local' and 'redo' DAG
-            # Params map to hammer's --local (skip the DB cache pull, run the
-            # tool locally) and --force (ignore dependency checks). They apply to
-            # every stage in this run, so selecting e.g. 'par' + 'local' runs par
-            # locally with no per-target flags.
+            # Per-run modifiers. 'local' adds --local to every stage; 'redo' adds
+            # --force only to the selected stages, 'forceall' to every stage this
+            # run executes. Bridge actions never take --force.
             _mods = {{}}
             if context is not None:
                 try:
@@ -792,7 +790,15 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                     _mods = {{}}
             if _mods.get('local'):
                 cmd += ["--local"]
-            if _mods.get('redo'):
+            _force = bool(_mods.get('forceall') or _mods.get('redo'))
+            if _force and context is not None:
+                try:
+                    _task = context['task']
+                    _force = _force_requested(_mods, _task.task_id,
+                                              _module_selected(_task_module(_task), _mods))
+                except Exception as e:
+                    print(f"[redo] per-stage force check failed ({{e}}); forcing this stage")
+            if _force and "-to-" not in action_clean and not action_clean.startswith("hier-"):
                 cmd += ["--force"]
 
             # Sub-step flow control from the trigger form. The flags attach only
@@ -880,6 +886,12 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             if not sel or any(m.lower() == 'all' for m in sel) or module is None:
                 return True
             return module in sel
+
+        def _force_requested(conf, task_id, module_selected):
+            \"\"\"Whether a stage task gets --force: 'forceall' forces every stage, 'redo' only the selected ones.\"\"\"
+            if conf.get('forceall'):
+                return True
+            return bool(conf.get('redo')) and bool(conf.get(task_id.split('.')[-1])) and module_selected
 
         def should_run_stage(stage_key, context):
             \"\"\"
@@ -1141,7 +1153,8 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                          description='Run the selected stages on these modules only (default: all).'),
         'tools': Param(default=DEFAULT_TOOLS, type='string', enum=TOOLS_CHOICES, title='Tools config'),
         'local': Param(default=False, type='boolean', title='Local (skip DB cache pull; run the tool locally)'),
-        'redo': Param(default=False, type='boolean', title='Redo (ignore dependency checks for this run)'),
+        'redo': Param(default=False, type='boolean', title='Redo (force the selected stages)'),
+        'forceall': Param(default=False, type='boolean', title='Redo all (force every stage this run executes)'),
         'from_step': Param(default='', type=['string', 'null'], title='From step',
                            description_md='Start the selected stage from this sub-step, loading its pre_<step> checkpoint from the rundir. Leave empty for automatic resume.\\n\\n{_steps_hint}'),
         'to_step': Param(default='', type=['string', 'null'], title='To step',

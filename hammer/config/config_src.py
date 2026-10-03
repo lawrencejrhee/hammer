@@ -1190,7 +1190,7 @@ class HammerDatabase:
         else:
             return obj
 
-    def stage_change_check(self, stage: str, filename: str = "master_database.json") -> bool:
+    def stage_change_check(self, stage: str, filename: str = "master_database.json", force: bool = False) -> bool:
         """
         Compare old and new database jsons to see if change occurred in any prior or current stages.
 
@@ -1202,7 +1202,8 @@ class HammerDatabase:
 
         :param filename: Output filename for master database json
         :param stage: Which stage's database is being checked
-        :return: true if change detected, else false
+        :param force: Treat the stage as changed, so it reruns and marks every later stage
+        :return: true if change detected or forced, else false
         """
 
         # Load or initialize master DB
@@ -1311,7 +1312,7 @@ class HammerDatabase:
 
         config_change_flag = curStageCheck(self.stageGraph.stageDict[stage].tag, stage)
 
-        if config_change_flag:
+        if config_change_flag or force:
             propagateChangeFlag(stage)
             for affectedStage in affectedStages:
                 if affectedStage != stage:
@@ -1320,7 +1321,10 @@ class HammerDatabase:
                 else:
                     print("setting NeedsToReRun False for " + str(affectedStage))
                     master_db_contents[affectedStage + ".needsToRerun"] = False
-            print(f"Database changed, stages affected are {affectedStages}")
+            if config_change_flag:
+                print(f"Database changed, stages affected are {affectedStages}")
+            else:
+                print(f"Forced rerun of {stage}, stages affected are {affectedStages}")
             if self._hammer_dir is not None:
                 master_db_contents["vlsi.hammer_dir"] = self._hammer_dir
             master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
@@ -1328,7 +1332,7 @@ class HammerDatabase:
         else:
             self._pending_master_db = None
             print(f"Database unchanged, can skip {stage}")
-        return config_change_flag
+        return config_change_flag or force
 
     def commit_master_database(self) -> None:
         """Write the pending master database update to disk. Call only after a successful stage run."""

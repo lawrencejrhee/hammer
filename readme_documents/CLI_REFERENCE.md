@@ -135,13 +135,17 @@ sim_par timing_par formal_par power_par drc lvs` (dashes accepted).
 | `--obj_dir` | build directory (required) |
 | `--design` | design name; defaults to the obj_dir basename |
 | `--module M` | restrict to these modules, repeatable (hierarchical flows) |
-| `--redo` | ignore dependency checks for this run |
+| `--force`, `--redo` | rerun the named stages even if nothing changed: skip the cache lookup, overwrite the cache entry, mark later stages to rerun. Earlier stages the run needs keep their normal check |
+| `--forceall`, `--redo-all` | the same for every stage the run executes, earlier ones included |
 | `--local` | skip the DB cache pull, run the tool locally |
 | `--from-step` / `--to-step` / `--only-step` | sub-step control |
 | `--steps-stage {syn,par}` | which stage the step flags apply to |
 | `--workspace`, `--project` | workspace routing, ledger project label |
 | `--run-id` | name the run instead of an auto `cli_<epoch>` |
 | `--no-wait` | trigger and return immediately |
+
+DAGs generated before `--forceall` existed still force every stage under `--force`;
+regenerate them (`make buildfile`) and restart Airflow. `sledgehammer` warns when it sees one.
 
 The exit code follows the run, so `sledgehammer run ... && next-step` behaves.
 Ctrl-C detaches from the stream; the run keeps going.
@@ -310,7 +314,8 @@ Identical to `hammer-vlsi` unless noted.
 | `-e`, `-p` | yes | n/a — configs are baked in at `make buildfile` |
 | `--obj_dir` | yes | optional — read from the registered DAG |
 | `-t`, `--top` | yes | yes (`--design` also accepted) |
-| `--force` | yes | yes (`--redo` also accepted) |
+| `--force` | yes | yes (`--redo` also accepted); forces only the named stages |
+| `--forceall` | n/a | forces every stage the run executes (`--redo-all` also accepted) |
 | `--local` | yes | yes |
 | `--start_before_step` / `--from_step` | yes | yes |
 | `--stop_after_step` / `--to_step` | yes | yes |

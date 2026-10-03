@@ -14,7 +14,7 @@ def _restore_logging_callbacks():
     HammerVLSILogging.callbacks = saved
 
 
-_PLACEHOLDER_RTL_TEST_MODULES = {"test_cli_driver", "test_flowgraph"}
+_PLACEHOLDER_RTL_TEST_MODULES = {"test_cli_driver", "test_flowgraph", "test_force_rerun"}
 
 
 def _byte_hash_digest(paths, include_dirs=(), defines=(), top_module=None):

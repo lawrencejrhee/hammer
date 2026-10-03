@@ -101,9 +101,10 @@ they say:
 - Explicit step flags bypass the unchanged-inputs skip. Previously a
   `--from_step` on an already-committed stage silently did nothing in two
   seconds; now asking for a step means the stage runs.
-- `--force` still means a scratch run, and a whole-stage cache HIT still
-  beats resume when no step flags are given: if the finished result is in
-  the cache there is nothing to resume.
+- `--force` still means a scratch run: it skips the PD cache lookup, runs
+  the tool and overwrites the cache entry. Without `--force` or step flags, a
+  whole-stage cache HIT still beats resume: if the finished result is in the
+  cache there is nothing to resume.
 
 Note the checkpoint a step flag needs is the boundary written before that
 step, so after a pause at `add_tieoffs` the resumable step is the next one
@@ -143,7 +144,8 @@ the automation, validation, and cross-machine restore are what the fork adds.
 
 Automatic resume needs nothing from the UI: DAG tasks run the same CLI path,
 so a task that dies mid-tool resumes on the next triggered run by itself
-(the `redo` checkbox forces a scratch run instead). Manual step selection is
+(the `redo` checkbox forces a scratch run of the selected stages instead, and
+`Redo all` of every stage the run executes). Manual step selection is
 in the trigger form, injected straight into the task's argv:
 
 - `From step` / `To step` / `Only step` - free-text sub-step names, validated

@@ -491,6 +491,7 @@ def cache_or_run(
     output_filename: str,
     run_fn: Callable[[], Tuple[bool, Dict[str, Any]]],
     force_local: bool = False,
+    store: bool = True,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Cache wrapper around a stage's run function.
@@ -503,10 +504,12 @@ def cache_or_run(
             (e.g. "syn-output.json"). Used to reconstruct the output dict on
             cache hit.
         run_fn: Callable that actually runs the stage and returns (success, output).
-        force_local: If True (the --local flag), skip restoring from the Postgres
-            cache and run the stage locally. The fresh result is still STORED, so
-            a local re-run refreshes the shared cache rather than ignoring it.
-            Dependency checks are unaffected -- that's the separate --force flag.
+        force_local: If True (the --local or --force flag), skip restoring from
+            the Postgres cache and run the stage locally. The fresh result is still
+            STORED, overwriting the entry for this key, so a forced or local re-run
+            refreshes the shared cache rather than ignoring it.
+        store: If False (a run with step flags, whose result may be partial),
+            run without storing under the full-stage key.
 
     Returns:
         (success, output) tuple, identical in shape to run_fn's return value.
@@ -545,7 +548,7 @@ def cache_or_run(
         # --local: skip the DB restore entirely and run the tool locally. We
         # still computed the key above and STILL store the fresh result below,
         # so a local re-run refreshes the shared cache instead of bypassing it.
-        _info(f"PD cache: --local set; skipping DB lookup for {stage_tag}, running locally.")
+        _info(f"PD cache: --local or --force set; skipping DB lookup for {stage_tag}, running locally.")
         blob = None
     else:
         try:
@@ -614,7 +617,17 @@ def cache_or_run(
     cpu_seconds: Optional[float] = None
     if cpu0 is not None and cpu1 is not None:
         cpu_seconds = max(0.0, cpu1 - cpu0)
-    if success:
+    if success and not store:
+        _info(f"PD cache: step flags set; not storing this {stage_tag} run, which may be partial.")
+        _record_cache_event(
+            stage_tag, "MISS_STORE",
+            tool_seconds=duration_seconds,
+            tool_cpu_seconds=cpu_seconds,
+            store_seconds=None,
+            module=module,
+            enabled=ledger_on,
+        )
+    elif success:
         try:
             # Write the stage's output dict into the rundir BEFORE we tar it.
             # cli_driver writes <stage>-output.json after we return, but we
