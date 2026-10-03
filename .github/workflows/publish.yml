@@ -6,6 +6,8 @@ on:
 
 jobs:
   publish:
+    # hammer-vlsi on PyPI is upstream's; a release on a fork must never publish it.
+    if: github.repository == 'ucb-bar/hammer'
     runs-on: ubuntu-latest
     continue-on-error: false
     steps:

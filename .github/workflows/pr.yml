@@ -7,10 +7,23 @@ on:
   push:
     branches:
       - master
+  # Run by hand from the Actions tab, or: gh workflow run hammer-pr-ci
+  workflow_dispatch:
+
+# CI only reads the repo; the repo-wide default token could also write.
+permissions:
+  contents: read
+
+env:
+  # The RTL fingerprint shells out to slang and refuses any version other than
+  # rtl_check.SLANG_VERSION. Bump these together, with the release asset's sha256.
+  SLANG_VERSION: "11.0"
+  SLANG_SHA256: "951a170e10e25e54c91565030acfdfc11c3226714ebf225a18ad4166a898d8a4"
 
 jobs:
   tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         python-version: ["3.9", "3.10", "3.11"]
@@ -27,6 +40,21 @@ jobs:
         # --extra cache pulls psycopg2-binary so the PD cache modules
         # typecheck; the asap7 extras stay out (gdspy 1.4 builds from source).
         run: uv sync --locked --extra cache
+      - name: Install slang
+        run: |
+          pinned=$(uv run python -c "from hammer.vlsi import rtl_check; print(rtl_check.SLANG_VERSION)")
+          if [ "$pinned" != "$SLANG_VERSION" ]; then
+            echo "rtl_check pins slang $pinned, but this workflow installs $SLANG_VERSION"
+            exit 1
+          fi
+          curl -fsSL -o "$RUNNER_TEMP/slang.tar.gz" \
+            "https://github.com/MikePopoloski/slang/releases/download/v${SLANG_VERSION}/slang-linux-x86_64.tar.gz"
+          echo "$SLANG_SHA256  $RUNNER_TEMP/slang.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/slang"
+          tar xzf "$RUNNER_TEMP/slang.tar.gz" -C "$RUNNER_TEMP/slang"
+          chmod +x "$RUNNER_TEMP/slang/slang"
+          "$RUNNER_TEMP/slang/slang" --version
+          echo "SLANG_BIN=$RUNNER_TEMP/slang/slang" >> "$GITHUB_ENV"
       - name: Run unit tests
         run: uv run pytest tests/ -v
       - name: Type checking
