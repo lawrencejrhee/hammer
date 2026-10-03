@@ -603,6 +603,11 @@ BEGIN
 END $$;
 """
 
+# The DDL stamps its own hash on pd_checkpoints, so hot paths can tell whether the schema is current without taking locks.
+_DDL_VERSION = "sledgehammer:" + hashlib.sha256(_DDL.encode("utf-8")).hexdigest()[:16]
+_DDL_VERSIONED = _DDL + f"\nCOMMENT ON TABLE {FQ_CHECKPOINT} IS '{_DDL_VERSION}';\n"
+_schema_settled: Set[Tuple[Any, ...]] = set()
+
 
 def _ensure_schema(conn, quiet: bool = False) -> None:
     """Create the schema + table if they don't exist. Safe to call repeatedly.
@@ -612,14 +617,38 @@ def _ensure_schema(conn, quiet: bool = False) -> None:
     user who's already in sledgehammer_users would otherwise fail here on
     every write. The schema already exists when that user is calling, so
     swallowing the error and continuing is the correct behavior.
+
+    Quiet calls (every hot path) run the DDL only when the version stamp is
+    behind, at most once per process and database, and give up after 2 s
+    rather than queue their ACCESS EXCLUSIVE locks behind a long transfer.
     """
+    info = getattr(conn, "info", None)
+    key = (getattr(info, "host", None), getattr(info, "port", None), getattr(info, "dbname", None))
+    if not quiet:
+        with conn.cursor() as cur:
+            cur.execute(_DDL_VERSIONED)
+        conn.commit()
+        _schema_settled.add(key)
+        return
+    if key in _schema_settled:
+        return
+    with conn.cursor() as cur:
+        cur.execute("SELECT obj_description(to_regclass(%s), 'pg_class')", (FQ_CHECKPOINT,))
+        row = cur.fetchone()
+    conn.commit()
+    if row is not None and row[0] == _DDL_VERSION:
+        _schema_settled.add(key)
+        return
     try:
         with conn.cursor() as cur:
-            cur.execute(_DDL)
+            # one execute, so the timeout holds even on an autocommit connection
+            cur.execute("SET LOCAL lock_timeout = '2s';\n" + _DDL_VERSIONED)
         conn.commit()
+        _schema_settled.add(key)
     except psycopg2.errors.InsufficientPrivilege:
-        if not quiet:
-            raise
+        conn.rollback()
+        _schema_settled.add(key)
+    except psycopg2.errors.LockNotAvailable:
         conn.rollback()
 
 
