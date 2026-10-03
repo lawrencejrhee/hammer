@@ -492,6 +492,7 @@ def cache_or_run(
     run_fn: Callable[[], Tuple[bool, Dict[str, Any]]],
     force_local: bool = False,
     store: bool = True,
+    accept: Optional[Callable[[], bool]] = None,
 ) -> Tuple[bool, Dict[str, Any]]:
     """
     Cache wrapper around a stage's run function.
@@ -504,12 +505,14 @@ def cache_or_run(
             (e.g. "syn-output.json"). Used to reconstruct the output dict on
             cache hit.
         run_fn: Callable that actually runs the stage and returns (success, output).
-        force_local: If True (the --local or --force flag), skip restoring from
-            the Postgres cache and run the stage locally. The fresh result is still
-            STORED, overwriting the entry for this key, so a forced or local re-run
-            refreshes the shared cache rather than ignoring it.
+        force_local: If True (the --local or --force flag, or step flags), skip
+            restoring from the Postgres cache and run the stage locally. The fresh
+            result is still STORED, overwriting the entry for this key, so a forced
+            or local re-run refreshes the shared cache rather than ignoring it.
         store: If False (a run with step flags, whose result may be partial),
             run without storing under the full-stage key.
+        accept: Called after a successful run, before storing; False (for
+            example a fatal error scan) keeps the run out of the cache.
 
     Returns:
         (success, output) tuple, identical in shape to run_fn's return value.
@@ -548,7 +551,7 @@ def cache_or_run(
         # --local: skip the DB restore entirely and run the tool locally. We
         # still computed the key above and STILL store the fresh result below,
         # so a local re-run refreshes the shared cache instead of bypassing it.
-        _info(f"PD cache: --local or --force set; skipping DB lookup for {stage_tag}, running locally.")
+        _info(f"PD cache: --local, --force or step flags set; skipping DB lookup for {stage_tag}, running locally.")
         blob = None
     else:
         try:
@@ -617,8 +620,19 @@ def cache_or_run(
     cpu_seconds: Optional[float] = None
     if cpu0 is not None and cpu1 is not None:
         cpu_seconds = max(0.0, cpu1 - cpu0)
+    skip_store = None
     if success and not store:
-        _info(f"PD cache: step flags set; not storing this {stage_tag} run, which may be partial.")
+        skip_store = f"step flags set; not storing this {stage_tag} run, which may be partial."
+    elif success and accept is not None:
+        try:
+            accepted = accept()
+        except Exception as e:
+            _warn(f"PD cache: post-run check for {stage_tag} raised ({e}).")
+            accepted = False
+        if not accepted:
+            skip_store = f"{stage_tag} failed its post-run checks; not storing this run."
+    if skip_store:
+        _info(f"PD cache: {skip_store}")
         _record_cache_event(
             stage_tag, "MISS_STORE",
             tool_seconds=duration_seconds,

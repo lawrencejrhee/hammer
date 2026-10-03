@@ -779,6 +779,13 @@ class CLIDriver:
                         driver, "synthesis", driver.syn_tool.run_dir,
                         resume_plan["step"] if resume_plan else None)
                     from hammer.vlsi.pd_cache import cache_or_run
+                    from hammer.vlsi import error_scan
+                    scans = []
+                    tool_rundir = driver.syn_tool.run_dir
+                    def scan_clean() -> bool:
+                        scans.append(error_scan.scan_and_report(
+                            driver, "synthesis", tool_rundir, "genus.log"))
+                        return not (scans[-1] and scans[-1].get("fatal"))
                     # write-ahead intent: mark needs-rerun BEFORE the tool runs.
                     # If this process dies uncatchably (SIGKILL, OOM, power),
                     # the master otherwise still claims the last commit and the
@@ -793,8 +800,9 @@ class CLIDriver:
                             driver.syn_tool.get_tool_hooks() + \
                             driver.tech.get_tech_syn_hooks(driver.syn_tool.name) + \
                             list(extra_hooks or [])),
-                        force_local=self.force_local or self.force_rerun,
+                        force_local=self.force_local or self.force_rerun or self._explicit_flow_control,
                         store=not self._explicit_flow_control,
+                        accept=scan_clean,
                         )
                     except BaseException:
                         # a killed or crashed tool unwinds as an exception and
@@ -841,8 +849,7 @@ class CLIDriver:
                     # The tool exited cleanly, but innovus/genus tolerate many
                     # real failures (e.g. unlegalized instances) as continuable
                     # ERROR lines. Scan the log and apply the fail_on policy.
-                    from hammer.vlsi import error_scan
-                    _scan = error_scan.scan_and_report(
+                    _scan = scans[-1] if scans else error_scan.scan_and_report(
                         driver, "synthesis", driver.syn_tool.run_dir, "genus.log")
                     if _scan and _scan.get("fatal"):
                         driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
@@ -956,6 +963,13 @@ class CLIDriver:
                         driver, "par", driver.par_tool.run_dir,
                         par_resume_plan["step"] if par_resume_plan else None)
                     from hammer.vlsi.pd_cache import cache_or_run
+                    from hammer.vlsi import error_scan
+                    scans = []
+                    tool_rundir = driver.par_tool.run_dir
+                    def scan_clean() -> bool:
+                        scans.append(error_scan.scan_and_report(
+                            driver, "par", tool_rundir, "innovus.log"))
+                        return not (scans[-1] and scans[-1].get("fatal"))
                     # write-ahead intent: mark needs-rerun BEFORE the tool runs.
                     # If this process dies uncatchably (SIGKILL, OOM, power),
                     # the master otherwise still claims the last commit and the
@@ -970,8 +984,9 @@ class CLIDriver:
                             driver.par_tool.get_tool_hooks() + \
                             driver.tech.get_tech_par_hooks(driver.par_tool.name) + \
                             list(extra_hooks or [])),
-                        force_local=self.force_local or self.force_rerun,
+                        force_local=self.force_local or self.force_rerun or self._explicit_flow_control,
                         store=not self._explicit_flow_control,
+                        accept=scan_clean,
                         )
                     except BaseException:
                         try:
@@ -1005,8 +1020,7 @@ class CLIDriver:
                             "step are saved. Rerun without step flags to auto-resume "
                             "from there.")
                         return None
-                    from hammer.vlsi import error_scan
-                    _scan = error_scan.scan_and_report(
+                    _scan = scans[-1] if scans else error_scan.scan_and_report(
                         driver, "par", driver.par_tool.run_dir, "innovus.log")
                     if _scan and _scan.get("fatal"):
                         driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")

@@ -117,7 +117,7 @@ class TestForcedRun:
         assert stores == []
         _run(tmp_path, "syn", "--force", "--to_step", "step2")
         assert stores == []
-        assert len(loads) == 1
+        assert loads == []
 
 
 def _generated_dag(tmp_path: Path, monkeypatch) -> str:
