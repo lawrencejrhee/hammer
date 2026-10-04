@@ -575,6 +575,10 @@ def main() -> int:
         os.execvp("bash", cmd)
 
     # Otherwise pass straight through to the airflow CLI, secrets loaded first.
+    # The stack env file applies here too; AIRFLOW_HOME stays pinned above.
+    loaded = _load_stack_env()
+    if loaded:
+        print(f"[sledgehammer] stack env from {loaded}", file=sys.stderr)
     cmd = [_venv_bin("airflow")] + args
     if os.environ.get("SLEDGE_DRYRUN"):
         print(f"[dryrun] passthrough  AIRFLOW_HOME={os.environ['AIRFLOW_HOME']} "

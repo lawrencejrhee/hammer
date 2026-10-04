@@ -30,3 +30,12 @@ def _byte_hash_placeholder_rtl(request, monkeypatch):
     if request.module.__name__.rsplit(".", 1)[-1] in _PLACEHOLDER_RTL_TEST_MODULES:
         monkeypatch.setattr(rtl_check, "digest_units", _byte_hash_digest)
         monkeypatch.setattr(rtl_check, "digest_files", _byte_hash_digest)
+
+
+@pytest.fixture(autouse=True)
+def _no_developer_stack_env(monkeypatch):
+    """Keep a developer's stack env file (~/.sledgehammer/env.sh, or a stack_env.sh above the cwd) out of the CLIs under test; only SLEDGE_ENV_FILE is honored."""
+    from hammer.shell import sledgehammer_cli
+    monkeypatch.delenv("SLEDGE_ENV_FILE", raising=False)
+    monkeypatch.setattr(sledgehammer_cli, "_find_stack_env",
+                        lambda: os.environ.get("SLEDGE_ENV_FILE") if os.path.isfile(os.environ.get("SLEDGE_ENV_FILE", "")) else None)

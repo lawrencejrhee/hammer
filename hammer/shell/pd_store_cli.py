@@ -1886,6 +1886,11 @@ def _cmd_notify_test(args: argparse.Namespace) -> int:
 def main(argv: List[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # stderr only: scripts parse the stdout of stage-key and workspace-show
+    from hammer.shell.sledgehammer_cli import _load_stack_env
+    loaded = _load_stack_env()
+    if loaded:
+        print(f"[studio] stack env from {loaded}", file=sys.stderr)
     return args.func(args)
 
 
