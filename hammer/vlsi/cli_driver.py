@@ -820,7 +820,7 @@ class CLIDriver:
                     # If this process dies uncatchably (SIGKILL, OOM, power),
                     # the master otherwise still claims the last commit and the
                     # next invocation would skip, stranding the recompute.
-                    driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
+                    driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json", reason = "pending")
                     try:
                         success, output = cache_or_run(
                             driver, "synthesis",
@@ -985,7 +985,7 @@ class CLIDriver:
                     # If this process dies uncatchably (SIGKILL, OOM, power),
                     # the master otherwise still claims the last commit and the
                     # next invocation would skip, stranding the recompute.
-                    driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
+                    driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json", reason = "pending")
                     try:
                         success, output = cache_or_run(
                             driver, "par",

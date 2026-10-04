@@ -1371,12 +1371,13 @@ class HammerDatabase:
             print(f"[master-db] WARNING: postgres mirror failed ({e}); "
                   f"the on-disk file at {master_path} is the only copy of this write")
 
-    def revert_rerun(self, stage: str, filename: str = "master_database.json"):
+    def revert_rerun(self, stage: str, filename: str = "master_database.json", reason: str = "failed"):
         """
         reset NeedsToReRun True for stage after stage attempt fails
 
         :param filename: Output filename for master database json
         :param stage: Which stage's database is being checked
+        :param reason: "failed" after a failed attempt, "pending" for the mark set before the tool runs
         :return: none
         """
         master_path = Path(filename)
@@ -1390,9 +1391,12 @@ class HammerDatabase:
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             master_db_contents = dict()
 
-        print("setting NeedsToReRun True for " + str(stage))
+        if reason == "pending":
+            print(f"marking {stage} needs-rerun until this run completes")
+        else:
+            print("setting NeedsToReRun True for " + str(stage))
+            print(f"STAGE FAILED, REQUIRING RERUN")
         master_db_contents[stage + ".needsToRerun"] = True
-        print(f"STAGE FAILED, REQUIRING RERUN")
         master_db_contents_str = json.dumps(master_db_contents, cls=HammerJSONEncoder, sort_keys=True, indent=4, separators=(',', ': '))
         master_path.write_text(master_db_contents_str)
         print(f"Updated Database exported to {master_path}")
