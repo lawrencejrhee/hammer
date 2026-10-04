@@ -22,7 +22,6 @@ def spies(tmp_path, monkeypatch):
     loads, stores = [], []
     monkeypatch.setattr(pd_store, "load_stage_blob", lambda key: loads.append(key))
     monkeypatch.setattr(pd_store, "store_stage_blob", lambda stage, key, *a, **k: stores.append(key))
-    monkeypatch.setattr(pd_cache, "_legacy_lookup", lambda *a, **k: (None, None))
     monkeypatch.setattr(pd_cache, "_record_cache_event", lambda *a, **k: None)
     monkeypatch.setattr(pd_cache, "_stamp_project_from_config", lambda *a, **k: None)
     rtl = tmp_path / "top.v"

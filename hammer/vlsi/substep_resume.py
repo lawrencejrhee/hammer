@@ -13,13 +13,15 @@ of starting over.
 Trust rules, in order:
 
   * A checkpoint counts only if the tool's log confirms the write finished
-    (genus prints "Finished exporting design database to file 'pre_X'") and
-    the file is still on disk. Newest confirmed wins, not newest mtime, so a
-    write the tool died inside of is never trusted.
+    (genus prints "Finished exporting design database to file 'pre_X'"), the
+    file is still on disk, and it has not been modified since that log was
+    last written. Newest confirmed wins, not newest mtime, so a write the
+    tool died inside of is never trusted.
   * The marker file's stage key (the same config+RTL fingerprint the PD cache
     uses) must match the current inputs. A mismatch means the checkpoints
     describe a different design state: they are deleted and the run starts
-    from scratch.
+    from scratch. When the key cannot be computed or the marker file cannot
+    be opened, nothing is resumed and nothing is deleted.
   * A resume that makes no progress burns its checkpoint: the next attempt
     uses the next older confirmed one, and when the ladder is exhausted the
     run starts from scratch. No resume loops on a corrupt database.
@@ -38,7 +40,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 MARKER_NAME = ".substep_resume.json"
 ENABLE_ENV_VAR = "HAMMER_SUBSTEP_RESUME"
@@ -117,9 +119,11 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log",
     a resume attempt that dies loading its checkpoint confirms nothing in its
     own log, but the checkpoints proven by earlier attempts are still on disk
     and still valid (a stage-key change deletes them, so presence plus the
-    marker key check is sufficient). The result is ordered by checkpoint
-    mtime, oldest first, which is completion order. With ``since``, only logs
-    and checkpoints modified after that time count."""
+    marker key check is sufficient). A log vouches only for checkpoints no
+    newer than itself (or than ``latest``, for the write that link confirms).
+    The result is ordered by checkpoint mtime, oldest first, which is
+    completion order. With ``since``, only logs and checkpoints modified
+    after that time count."""
     pat = _CONFIRM_RE.get(log_name)
     if pat is None:
         return []
@@ -129,8 +133,10 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log",
     if not cands:
         return []
     target = None
+    latest_mtime = None
     try:
         target = os.path.basename(os.readlink(os.path.join(rundir, "latest")))
+        latest_mtime = os.lstat(os.path.join(rundir, "latest")).st_mtime
     except OSError:
         pass
     def _log_mtime(path: str) -> float:
@@ -139,8 +145,10 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log",
         except OSError:
             return 0.0
     announced: List[str] = []  # first-seen announced order, oldest log first
+    vouched: Dict[str, float] = {}
     for log in sorted(cands, key=_log_mtime):
-        if since is not None and _log_mtime(log) <= since:
+        log_mtime = _log_mtime(log)
+        if since is not None and log_mtime <= since:
             continue
         names: List[str] = []
         try:
@@ -151,13 +159,22 @@ def confirmed_checkpoints(rundir: str, log_name: str = "genus.log",
                         names.append(m.group(1))
         except OSError:
             continue
+        last_vouch = log_mtime
         # the drop-the-last-announced rule applies per attempt (per log)
-        if names and log_name in _INFER_COMPLETION and target != "pre_" + names[-1]:
-            names = names[:-1]
-        for n in names:
-            if n not in announced and n != "dummy_step":
+        if names and log_name in _INFER_COMPLETION:
+            if target != "pre_" + names[-1]:
+                names = names[:-1]
+            elif latest_mtime is not None:
+                last_vouch = max(log_mtime, latest_mtime)
+        for i, n in enumerate(names):
+            if n == "dummy_step":
+                continue
+            if n not in announced:
                 announced.append(n)
-    present = [n for n in announced if _checkpoint_present(rundir, n)]
+            v = last_vouch if i == len(names) - 1 else log_mtime
+            vouched[n] = max(vouched.get(n, v), v)
+    present = [n for n in announced
+               if _checkpoint_present(rundir, n) and _ck_mtime(rundir, n) <= vouched[n]]
     if since is not None:
         present = [n for n in present if _ck_mtime(rundir, n) > since]
 
@@ -197,6 +214,16 @@ def announced_order(rundir: str, log_name: str = "genus.log") -> List[str]:
     order is wrong for mixed-generation rundirs: an old completed run's
     pre_write_regs has an EARLIER mtime than a fresh attempt's pre_clock_tree
     even though write_regs is a later step."""
+    announced: List[str] = []
+    for names in _log_announcements(rundir, log_name):
+        for n in names:
+            if n not in announced:
+                announced.append(n)
+    return announced
+
+
+def _log_announcements(rundir: str, log_name: str) -> List[List[str]]:
+    """Each log rotation's announced step names in log order, oldest log first."""
     pat = _CONFIRM_RE.get(log_name)
     if pat is None:
         return []
@@ -209,17 +236,19 @@ def announced_order(rundir: str, log_name: str = "genus.log") -> List[str]:
             return os.path.getmtime(path)
         except OSError:
             return 0.0
-    announced: List[str] = []
+    logs: List[List[str]] = []
     for log in sorted(cands, key=_log_mtime):
+        names: List[str] = []
         try:
             with open(log, errors="ignore") as fh:
                 for line in fh:
                     m = pat.search(line)
-                    if m and m.group(1) not in announced:
-                        announced.append(m.group(1))
+                    if m:
+                        names.append(m.group(1))
         except OSError:
-            continue
-    return announced
+            pass
+        logs.append(names)
+    return logs
 
 
 
@@ -235,32 +264,99 @@ def read_marker(rundir: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _load_marker(rundir: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """The marker and its state: "ok", "absent", "unreadable" (an I/O error)
+    or "corrupt" (read, but not a JSON object)."""
+    try:
+        with open(_marker_path(rundir)) as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        return "absent", None
+    except OSError:
+        return "unreadable", None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return "corrupt", None
+    if not isinstance(data, dict):
+        return "corrupt", None
+    return "ok", data
+
+
 def write_marker(rundir: str, data: Dict[str, Any]) -> None:
+    """Replace the marker atomically, so a reader never sees a partial one."""
+    tmp = None
     try:
         os.makedirs(rundir, exist_ok=True)
-        with open(_marker_path(rundir), "w") as fh:
+        tmp = f"{_marker_path(rundir)}.{os.getpid()}.tmp"
+        with open(tmp, "w") as fh:
             json.dump(data, fh, indent=2)
+        os.replace(tmp, _marker_path(rundir))
+        tmp = None
     except Exception:
         # advisory state only; never fail the run over it
+        pass
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+def _checkpoint_paths(rundir: str) -> List[str]:
+    return [p for p in glob.glob(os.path.join(rundir, "pre_*"))
+            if re.fullmatch(r"pre_[A-Za-z0-9_]+", os.path.basename(p))]
+
+
+def _remove_checkpoint(path: str) -> None:
+    try:
+        if os.path.isdir(path) and not os.path.islink(path):
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            os.unlink(path)
+    except OSError:
         pass
 
 
 def clean_checkpoints(rundir: str) -> None:
     """Remove stale checkpoint dbs and the marker (inputs changed)."""
-    for p in glob.glob(os.path.join(rundir, "pre_*")):
-        if not re.fullmatch(r"pre_[A-Za-z0-9_]+", os.path.basename(p)):
-            continue
-        try:
-            if os.path.isdir(p) and not os.path.islink(p):
-                shutil.rmtree(p, ignore_errors=True)
-            else:
-                os.unlink(p)
-        except OSError:
-            pass
+    for p in _checkpoint_paths(rundir):
+        _remove_checkpoint(p)
     try:
         os.unlink(_marker_path(rundir))
     except OSError:
         pass
+
+
+def _drop_foreign_checkpoints(rundir: str, resumed_from: Optional[str],
+                              start_step: Optional[str], start_inclusive: bool,
+                              log_name: str, step_names: Sequence[str] = ()) -> None:
+    """Delete the checkpoints other inputs left, except the one this attempt
+    starts from and those of earlier steps."""
+    keep: Set[str] = set()
+    if resumed_from is not None:
+        keep.add(resumed_from)
+    elif start_step is not None:
+        logs = _log_announcements(rundir, log_name)
+        starts = [start_step]
+        if not start_inclusive:
+            # the run reads the checkpoint of the step after start_step
+            after = [names[names.index(start_step) + 1] for names in logs
+                     if start_step in names[:-1]]
+            static = list(step_names)
+            if not after and start_step in static[:-1]:
+                after = [static[static.index(start_step) + 1]]
+            starts += after
+        for s in starts:
+            keep.add(s)
+            # one log is one attempt, so its order is true step order
+            for names in logs:
+                if s in names:
+                    keep.update(names[: names.index(s)])
+    for p in _checkpoint_paths(rundir):
+        if os.path.basename(p)[len("pre_"):] not in keep:
+            _remove_checkpoint(p)
 
 
 def _stage_key(driver: Any, stage_tag: str) -> Optional[str]:
@@ -506,6 +602,21 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
         confirmed = confirmed_checkpoints(rundir, log_name)
         if not confirmed:
             return _db_fallback_plan(driver, stage_tag, rundir)
+        # a key or marker we cannot read proves nothing either way, and the
+        # failure may be transient: run from scratch but keep the checkpoints
+        key = _stage_key(driver, stage_tag)
+        if key is None:
+            return None
+        state, marker = _load_marker(rundir)
+        if state == "unreadable":
+            return None
+        if marker is None or marker.get("stage_key") != key:
+            # checkpoints came from different inputs (or we can't prove
+            # otherwise): they are worthless and could mislead a later run.
+            # The database may still hold one pushed for the CURRENT inputs
+            # (e.g. by another machine), so check it before going scratch.
+            clean_checkpoints(rundir)
+            return _db_fallback_plan(driver, stage_tag, rundir)
         # A present output json only means "completed" if it is newer than the
         # newest confirmed checkpoint. An older one is a leftover from an
         # earlier successful run that a later (killed) attempt superseded --
@@ -519,15 +630,6 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
                     return None  # genuinely completed; dep-check/cache own this
             except OSError:
                 return None
-        key = _stage_key(driver, stage_tag)
-        marker = read_marker(rundir)
-        if key is None or marker is None or marker.get("stage_key") != key:
-            # checkpoints came from different inputs (or we can't prove
-            # otherwise): they are worthless and could mislead a later run.
-            # The database may still hold one pushed for the CURRENT inputs
-            # (e.g. by another machine), so check it before going scratch.
-            clean_checkpoints(rundir)
-            return _db_fallback_plan(driver, stage_tag, rundir)
         burned = list(marker.get("burned", []))
         # a resume that produced no new confirmed checkpoint made no progress:
         # burn that rung so we step down the ladder instead of looping
@@ -577,17 +679,25 @@ def plan_resume(driver: Any, stage_tag: str, rundir: str, output_filename: str,
 
 
 def record_attempt(driver: Any, stage_tag: str, rundir: str,
-                   resumed_from: Optional[str]) -> None:
+                   resumed_from: Optional[str], start_step: Optional[str] = None,
+                   start_inclusive: bool = True, log_name: str = "genus.log",
+                   step_names: Sequence[str] = ()) -> None:
     """Stamp the marker for the attempt that is about to run.
 
     Keeps the burned ladder when the inputs are unchanged; a new stage key
-    starts fresh (the old ladder belonged to different inputs).
+    starts fresh (the old ladder belonged to different inputs) and drops the
+    old inputs' checkpoints past where this attempt starts.
     """
     try:
         key = _stage_key(driver, stage_tag)
         if key is None:
             return
-        old = read_marker(rundir)
+        state, old = _load_marker(rundir)
+        if state == "unreadable":
+            return
+        if old is None or old.get("stage_key") != key:
+            _drop_foreign_checkpoints(rundir, resumed_from, start_step,
+                                      start_inclusive, log_name, step_names)
         burned = list(old.get("burned", [])) if old and old.get("stage_key") == key else []
         # lineage of config keys this rundir has attempted: lets a later
         # success clear the database rows its own earlier (differently

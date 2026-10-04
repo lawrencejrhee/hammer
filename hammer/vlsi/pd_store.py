@@ -1279,20 +1279,6 @@ def delete_blobs(**filters: Any) -> int:
         conn.close()
 
 
-def delete_stage_blob(sha256: str) -> bool:
-    """Delete one blob and its chunks. Returns True if a row was removed."""
-    conn = _connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(f"DELETE FROM {FQ_BLOB_CHUNK} WHERE sha256 = %s", (sha256,))
-            cur.execute(f"DELETE FROM {FQ_BLOB} WHERE sha256 = %s", (sha256,))
-            n = cur.rowcount
-        conn.commit()
-        return n > 0
-    finally:
-        conn.close()
-
-
 def reassign_blobs(
     *,
     set_owner: Optional[str] = None,
@@ -1508,11 +1494,9 @@ def list_artifacts(limit: int = 20) -> List[Tuple[Any, ...]]:
 
 
 def _stage_relevant_keys(master_db: Dict[str, Any], stage_tag: str) -> Dict[str, Any]:
+    from hammer.vlsi.fingerprints import OWNED_STAGE_TAGS
     own_prefix = stage_tag + "."
     output_prefix = stage_tag + ".outputs"
-    other_prefixes = tuple(
-        f"{tag}." for tag in KNOWN_STAGE_TAGS if tag != stage_tag
-    )
     out: Dict[str, Any] = {}
     for k, v in master_db.items():
         if k.endswith(".needsToRerun") or k in RUN_CONTROL_KEYS:
@@ -1520,7 +1504,7 @@ def _stage_relevant_keys(master_db: Dict[str, Any], stage_tag: str) -> Dict[str,
         if k.startswith(own_prefix):
             if not k.startswith(output_prefix):
                 out[k] = v
-        elif not k.startswith(other_prefixes):
+        elif not k.startswith(OWNED_STAGE_TAGS):
             out[k] = v
     return out
 
@@ -1556,7 +1540,7 @@ def compute_rtl_fingerprint(file_paths: List[str],
 COLLATERAL_EXTENSIONS = (
     ".lef", ".tlef", ".lib", ".lib.gz", ".db", ".ldb",
     ".tluplus", ".captable", ".qrc", ".qrctech",
-    ".gds", ".gds.gz", ".oas", ".cdl", ".spi", ".sp",
+    ".gds", ".gds.gz", ".oas", ".cdl", ".spi", ".sp", ".spice",
     ".v", ".sv",
 )
 
@@ -1589,6 +1573,7 @@ def _walk_config_paths(value: Any, out: Set[str], field: Optional[str] = None,
                                exclude_fields=exclude_fields)
 
 
+# Kept for the EECS 151 Lab 5 launcher, which wraps this function at import.
 def compute_collateral_fingerprint(
     config: Dict[str, Any],
     exclude_files: Optional[Set[str]] = None,
@@ -1597,7 +1582,7 @@ def compute_collateral_fingerprint(
     include_fields: Optional[Tuple[str, ...]] = None,
     exclude_fields: Tuple[str, ...] = (),
 ) -> str:
-    """Stat-fingerprint (path, size, mtime) of the tool collateral: library-ish
+    """Stat-fingerprint (path, size, mtime, ctime) of the tool collateral: library-ish
     absolute paths found in the config values, plus ``extra_files`` (the
     technology's own library list, which is not in the config). Stat follows
     symlinks and is consistent across machines on shared storage. Exclusions:
@@ -1621,21 +1606,10 @@ def compute_collateral_fingerprint(
         and not (exclude_prefixes and p.startswith(exclude_prefixes))
     )
     keep += sorted(set(extra_files or []))
-    h = hashlib.sha256()
-    debug_lines = []
-    for path in keep:
-        try:
-            st = os.stat(path)
-            line = f"{path}:{st.st_size}:{st.st_mtime_ns}"
-        except OSError:
-            line = f"MISSING:{path}"
-        h.update(line.encode("utf-8"))
-        debug_lines.append(line)
-    debug_out = os.environ.get("HAMMER_PD_COLLAT_DEBUG")
-    if debug_out:
-        with open(debug_out, "a") as f:
-            f.write("\n".join(debug_lines) + "\n---\n")
-    return h.hexdigest()
+    from hammer.vlsi import fingerprints
+    lines = [fingerprints.file_line(path) for path in keep]
+    fingerprints.debug_record("collateral", lines)
+    return fingerprints.digest_lines(lines)
 
 
 def store_master_database(
@@ -1806,18 +1780,6 @@ def store_stage_blob(
                         (sha256, seq, psycopg2.Binary(chunk)),
                     )
         conn.commit()
-    finally:
-        conn.close()
-
-
-def blob_created_at(sha256: str) -> Optional[float]:
-    """Epoch seconds at which a blob was stored, or None if absent."""
-    conn = _connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(f"SELECT created_at FROM {FQ_BLOB} WHERE sha256 = %s", (sha256,))
-            row = cur.fetchone()
-        return row[0].timestamp() if row and row[0] is not None else None
     finally:
         conn.close()
 

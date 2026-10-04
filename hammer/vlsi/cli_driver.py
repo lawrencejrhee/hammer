@@ -26,7 +26,8 @@ from .hammer_vlsi_impl import HammerTool, HammerVLSISettings
 from .hooks import HammerToolHookAction, HammerStartStopStep
 from .driver import HammerDriver, HammerDriverOptions
 from .hammer_build_systems import BuildSystems
-from . import rtl_check, hook_check
+from . import rtl_check, fingerprints
+from . import code_fingerprints  # noqa: F401  importing it snapshots the framework files as this process loaded them
 
 from functools import reduce
 from textwrap import dedent
@@ -213,6 +214,7 @@ class CLIDriver:
         self._explicit_flow_control = False
         self._explicit_start_step = None  # type: Optional[str]  # type: bool
         self._explicit_start_given = False
+        self._explicit_after_step = None  # type: Optional[str]
         self.force_local = False  # type: bool  # --local: skip the DB cache pull
         self.synthesis_action: CLIActionConfigType
         # If a subclass has defined these, don't clobber them in init
@@ -626,6 +628,7 @@ class CLIDriver:
             # Ignore comments/whitespace in RTL
             # Store the computed fingerprint into the master database so stage_change_check
             # can treat RTL changes as dependency changes.
+            rtl_include_walk: List[str] = []
             try:
                 if driver.database.has_setting("synthesis.inputs.input_files"):
                     rtl_inputs = list(driver.database.get_setting("synthesis.inputs.input_files", nullvalue=[]))
@@ -640,10 +643,14 @@ class CLIDriver:
                     overall_sha256, fallback = rtl_check.digest_or_bytes(
                         rtl_inputs, include_dirs=include_dirs, defines=defines, top_module=top_module)
                     if fallback:
+                        rtl_include_walk = include_dirs
                         driver.log.warning(
                             f"RTL fingerprint fell back to a byte hash because {fallback}\n"
                             "Comment and whitespace edits now count as RTL changes, and files "
-                            "pulled in by `include are not covered. Install slang "
+                            "pulled in by `include count only when they sit under "
+                            "synthesis.inputs.include_dirs with a suffix in "
+                            f"{', '.join(fingerprints.RTL_INCLUDE_SUFFIXES)}, outside the build dir, "
+                            "the tech cache and any *-rundir directory. Install slang "
                             f"{rtl_check.SLANG_VERSION} with scripts/uv_setup.sh or set $SLANG_BIN "
                             "to restore the elaborated-design fingerprint.")
                     driver.database.set_setting("vlsi.rtl_fingerprint_sha256", overall_sha256)
@@ -654,87 +661,17 @@ class CLIDriver:
                 driver.log.error(f"Failed to compute RTL fingerprint: {e}")
                 return None
 
-            # HOOK FILES CHECK
-            # Hook fingerprint — detect changes to tech/user/tool hooks per stage.
-            # Stored as {stage_tag}.hooks_fingerprint_sha256 inside dictionary
-            _STAGE_HOOK_META = {
-                "synthesis":      ("synthesis",      "get_tech_syn_hooks",             "vlsi.core.synthesis_tool"),
-                "par":            ("par",            "get_tech_par_hooks",             "vlsi.core.par_tool"),
-                "drc":            ("drc",            "get_tech_drc_hooks",             "vlsi.core.drc_tool"),
-                "lvs":            ("lvs",            "get_tech_lvs_hooks",             "vlsi.core.lvs_tool"),
-                "sram_generator": ("sram_generator", "get_tech_sram_generator_hooks",  "vlsi.core.sram_generator_tool"),
-                "sim":            ("sim",            "get_tech_sim_hooks",             "vlsi.core.sim_tool"),
-                "power":          ("power",          "get_tech_power_hooks",           "vlsi.core.power_tool"),
-                "formal":         ("formal",         "get_tech_formal_hooks",          "vlsi.core.formal_tool"),
-                "timing":         ("timing",         "get_tech_timing_hooks",          "vlsi.core.timing_tool"),
-                "pcb":            ("pcb",            "get_tech_pcb_hooks",             "vlsi.core.pcb_tool"),
-            }
-            if action_type in _STAGE_HOOK_META:
-                stage_tag, tech_method, tool_cfg_key = _STAGE_HOOK_META[action_type]
+            fingerprint_stage = fingerprints.FINGERPRINT_STAGES.get(action_type)
+            if fingerprint_stage is not None:
                 try:
-                    tool_name = driver.database.get_setting(tool_cfg_key, nullvalue="")
-                    tech_hooks = getattr(driver.tech, tech_method)(tool_name.split(".")[-1])
-                    hook_fp = hook_check.fingerprint_stage_hooks(
-                        tech_hooks=tech_hooks,
-                        user_hooks=list(extra_hooks or []),
-                        tool_name=tool_name,
-                        stage=stage_tag,
-                    )
-                    driver.database.set_setting(f"{stage_tag}.hooks_fingerprint_sha256", hook_fp)
+                    stage_keys = fingerprints.stage_fingerprints(
+                        driver, self, fingerprint_stage, list(extra_hooks or []), rtl_include_dirs=rtl_include_walk)
                 except Exception as e:
-                    driver.log.error(f"Failed to compute hook fingerprint for {stage_tag}: {e}")
+                    driver.log.error(f"Failed to compute the {fingerprint_stage} fingerprints, so nothing ran, "
+                                     f"was committed or was stored: {e}")
                     return None
-
-            # COLLATERAL FILES CHECK
-            # The config only names libraries by path, so an edited LEF or lib
-            # is otherwise invisible and stale results can be reused. Stored as
-            # a setting so both stage_change_check and the cache key see
-            # collateral edits and force a rerun.
-            try:
-                import hammer.tech as hammer_tech
-                from hammer.vlsi import pd_store
-                lib_files: List[str] = []
-                for filt in (hammer_tech.filters.lef_filter,
-                             hammer_tech.filters.timing_lib_filter,
-                             hammer_tech.filters.verilog_synth_filter,
-                             hammer_tech.filters.gds_filter):
-                    try:
-                        lib_files += driver.tech.read_libs(
-                            [filt], hammer_tech.HammerTechnologyUtils.to_plain_item,
-                            must_exist=False)
-                    except Exception:
-                        pass
-                rtl_set = set()
-                if driver.database.has_setting("synthesis.inputs.input_files"):
-                    rtl_set = set(driver.database.get_setting("synthesis.inputs.input_files", nullvalue=[]))
-                cfg_snapshot = json.loads(driver.database.get_database_json())
-                # Spice netlists are consumed by LVS alone, so they get their
-                # own stage-scoped fingerprint (the "lvs." prefix means only
-                # lvs's stage_change_check compares it, same as the hooks
-                # fingerprints) and are excluded from the shared one. Without
-                # the split, an LVS-only collateral fix marks synthesis stale
-                # and costs a full re-syn + re-par. Both keys are computed on
-                # every invocation so every committed master snapshot carries
-                # both -- a snapshot missing one would ping-pong other stages
-                # stale.
-                _LVS_ONLY_FIELDS = ("spice_file", "spice_model_file")
-                collat_fp = pd_store.compute_collateral_fingerprint(
-                    cfg_snapshot,
-                    exclude_files=rtl_set,
-                    exclude_prefixes=(driver.obj_dir,) if driver.obj_dir else (),
-                    extra_files=lib_files,
-                    exclude_fields=_LVS_ONLY_FIELDS,
-                )
-                driver.database.set_setting("vlsi.collateral_fingerprint_sha256", collat_fp)
-                lvs_fp = pd_store.compute_collateral_fingerprint(
-                    cfg_snapshot,
-                    exclude_files=rtl_set,
-                    exclude_prefixes=(driver.obj_dir,) if driver.obj_dir else (),
-                    include_fields=_LVS_ONLY_FIELDS,
-                )
-                driver.database.set_setting("lvs.collateral_fingerprint_sha256", lvs_fp)
-            except Exception as e:
-                driver.log.error(f"Failed to compute collateral fingerprint: {e}")
+                for key, value in stage_keys.items():
+                    driver.database.set_setting(key, value)
 
             if action_type == "synthesis" or action_type == "syn":
                 print(driver.obj_dir)
@@ -771,9 +708,10 @@ class CLIDriver:
                     # steps[0] is static; the first_step property is only set
                     # during the run and raises before it
                     try:
-                        _first = driver.syn_tool.steps[0].name
+                        _steps = [s.name for s in driver.syn_tool.steps]
                     except Exception:
-                        _first = None
+                        _steps = []
+                    _first = _steps[0] if _steps else None
                     if self._explicit_start_step is not None and \
                             self._explicit_start_step != _first:
                         ok, detail = substep_resume.ensure_step_checkpoint(
@@ -807,7 +745,10 @@ class CLIDriver:
                             HammerStartStopStep(step=None, inclusive=False)))
                     substep_resume.record_attempt(
                         driver, "synthesis", driver.syn_tool.run_dir,
-                        resume_plan["step"] if resume_plan else None)
+                        resume_plan["step"] if resume_plan else None,
+                        start_step=self._explicit_start_step or self._explicit_after_step,
+                        start_inclusive=self._explicit_after_step is None,
+                        log_name="genus.log", step_names=_steps)
                     from hammer.vlsi.pd_cache import cache_or_run
                     from hammer.vlsi import error_scan
                     scans = []
@@ -938,9 +879,10 @@ class CLIDriver:
                     # steps[0] is static; the first_step property is only set
                     # during the run and raises before it
                     try:
-                        _first = driver.par_tool.steps[0].name
+                        _steps = [s.name for s in driver.par_tool.steps]
                     except Exception:
-                        _first = None
+                        _steps = []
+                    _first = _steps[0] if _steps else None
                     if self._explicit_start_step is not None and \
                             self._explicit_start_step != _first:
                         ok, detail = substep_resume.ensure_step_checkpoint(
@@ -972,7 +914,10 @@ class CLIDriver:
                             HammerStartStopStep(step=None, inclusive=False)))
                     substep_resume.record_attempt(
                         driver, "par", driver.par_tool.run_dir,
-                        par_resume_plan["step"] if par_resume_plan else None)
+                        par_resume_plan["step"] if par_resume_plan else None,
+                        start_step=self._explicit_start_step or self._explicit_after_step,
+                        start_inclusive=self._explicit_after_step is None,
+                        log_name="innovus.log", step_names=_steps)
                     from hammer.vlsi.pd_cache import cache_or_run
                     from hammer.vlsi import error_scan
                     scans = []
@@ -1919,6 +1864,7 @@ class CLIDriver:
             # branches validate that its checkpoint actually exists
             self._explicit_start_step = only_step or from_step
             self._explicit_start_given = start_step is not None
+            self._explicit_after_step = None if start_incl else start_step
             driver.set_post_custom_syn_tool_hooks(HammerTool.make_start_stop_hooks(
                 HammerStartStopStep(step=start_step, inclusive=start_incl),
                 HammerStartStopStep(step=stop_step, inclusive=stop_incl)))
