@@ -738,7 +738,22 @@ class CLIDriver:
 
             if action_type == "synthesis" or action_type == "syn":
                 print(driver.obj_dir)
-                if driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun or self._explicit_flow_control):
+                run_stage = driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun or self._explicit_flow_control)
+                if not run_stage:
+                    # stage_change_check says nothing changed. Normally we'd just return.
+                    # But the local rundir may have been wiped (cleanup, fresh checkout, etc.),
+                    # in which case downstream stages won't find syn-output.json. Try restoring
+                    # from the Postgres cache before declaring success-by-skip.
+                    pre_tool_config = driver.database.get_database_json()
+                    if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
+                        return None
+                    skipped = self._skip_path_output(driver, "synthesis", driver.syn_tool.run_dir, "syn",
+                                                     post_run_func_checked)
+                    if skipped is not None:
+                        return skipped
+                    driver.log.warning("syn is unchanged, but syn-output.json is missing and the PD cache has no copy; running syn.")
+                    run_stage = driver.database.stage_change_check(stage = "syn", filename = driver.obj_dir + "/master_database.json", force = True, config_json = pre_tool_config)
+                if run_stage:
                     if not driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
                         driver.database.revert_rerun(stage = "syn", filename = driver.obj_dir + "/master_database.json")
                         return None
@@ -893,19 +908,21 @@ class CLIDriver:
                     if driver.dump_history:
                         dump_config_to_yaml_file(os.path.join(driver.syn_tool.run_dir, "syn-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
-                else:
-                    # stage_change_check says nothing changed. Normally we'd just return.
-                    # But the local rundir may have been wiped (cleanup, fresh checkout, etc.),
-                    # in which case downstream stages won't find syn-output.json. Try restoring
-                    # from the Postgres cache before declaring success-by-skip.
-                    if driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
-                        skipped = self._skip_path_output(driver, "synthesis", driver.syn_tool.run_dir, "syn",
-                                                         post_run_func_checked)
-                        if skipped is not None:
-                            return skipped
-                    return 0
             elif action_type == "par":
-                if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun or self._explicit_flow_control):
+                run_stage = driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun or self._explicit_flow_control)
+                if not run_stage:
+                    # stage_change_check says nothing changed. Try cache restore in case
+                    # local par-rundir was wiped (see syn branch for full rationale).
+                    pre_tool_config = driver.database.get_database_json()
+                    if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
+                        return None
+                    skipped = self._skip_path_output(driver, "par", driver.par_tool.run_dir, "par",
+                                                     post_run_func_checked)
+                    if skipped is not None:
+                        return skipped
+                    driver.log.warning("par is unchanged, but par-output.json is missing and the PD cache has no copy; running par.")
+                    run_stage = driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json", force = True, config_json = pre_tool_config)
+                if run_stage:
                     if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
                         driver.database.revert_rerun(stage = "par", filename = driver.obj_dir + "/master_database.json")
                         return None
@@ -1041,15 +1058,6 @@ class CLIDriver:
                     if driver.dump_history:
                         dump_config_to_yaml_file(os.path.join(driver.par_tool.run_dir, "par-output-history.yml"),
                                                 add_key_history(self.get_full_config(driver, output), key_history))
-                else:
-                    # stage_change_check says nothing changed. Try cache restore in case
-                    # local par-rundir was wiped (see syn branch for full rationale).
-                    if driver.load_par_tool(get_or_else(self.par_rundir, "")):
-                        skipped = self._skip_path_output(driver, "par", driver.par_tool.run_dir, "par",
-                                                         post_run_func_checked)
-                        if skipped is not None:
-                            return skipped
-                    return 0
             elif action_type == "drc":
                 if driver.database.stage_change_check(stage = "drc", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun):
                     if not driver.load_drc_tool(get_or_else(self.drc_rundir, "")):

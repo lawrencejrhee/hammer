@@ -800,7 +800,7 @@ def try_restore_from_cache(
         _warn(
             f"PD cache (skip-path): stage_change_check would skip {stage_tag}, "
             f"but no local {output_filename} and no matching cache blob "
-            f"(sha256={short}...). Downstream stages will likely fail."
+            f"(sha256={short}...); {stage_tag} runs instead."
         )
         return False
 

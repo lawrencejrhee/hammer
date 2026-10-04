@@ -1190,7 +1190,8 @@ class HammerDatabase:
         else:
             return obj
 
-    def stage_change_check(self, stage: str, filename: str = "master_database.json", force: bool = False) -> bool:
+    def stage_change_check(self, stage: str, filename: str = "master_database.json", force: bool = False,
+                           config_json: Optional[str] = None) -> bool:
         """
         Compare old and new database jsons to see if change occurred in any prior or current stages.
 
@@ -1203,6 +1204,7 @@ class HammerDatabase:
         :param filename: Output filename for master database json
         :param stage: Which stage's database is being checked
         :param force: Treat the stage as changed, so it reruns and marks every later stage
+        :param config_json: Compare this database JSON instead of the current one, e.g. a snapshot taken before a tool loaded its defaults
         :return: true if change detected or forced, else false
         """
 
@@ -1222,7 +1224,7 @@ class HammerDatabase:
         affectedStages = set()
         stagePath = set()
 
-        new_db_contents = json.loads(self.get_database_json())
+        new_db_contents = json.loads(config_json if config_json is not None else self.get_database_json())
 
         def curStageCheck(tag:str, stage:str):
             keyChangeFlag = False
