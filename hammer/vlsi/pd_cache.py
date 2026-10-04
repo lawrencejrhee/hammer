@@ -122,16 +122,8 @@ def is_cache_enabled(driver: Optional[Any] = None) -> bool:
     env = os.environ.get(CACHE_ENV_VAR, "")
     if env.strip().lower() not in ("", "0", "false", "no", "off"):
         return True
-    if driver is not None:
-        try:
-            val = driver.database.get_setting(CACHE_SETTING_KEY, nullvalue=False)
-            if isinstance(val, bool) and val:
-                return True
-            if isinstance(val, str) and val.lower() in ("1", "true", "yes"):
-                return True
-        except Exception:
-            pass
-    return False
+    from hammer.vlsi import sledge_settings
+    return driver is not None and sledge_settings.flag(driver, CACHE_SETTING_KEY, False)
 
 
 class CacheRestoreContested(RuntimeError):

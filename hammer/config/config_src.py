@@ -833,6 +833,18 @@ def expand_paths(db_dict: dict, hammer_dir: str) -> dict:
     return result
 
 
+# SledgeHammer keys that choose how a stage runs (caching, resume, error scan,
+# where its DAG goes), never what it produces: they stay out of the dependency
+# check and the PD cache key, so setting one never reruns or re-keys a stage.
+RUN_CONTROL_KEYS = frozenset({
+    "vlsi.pd_cache.enabled", "vlsi.pd_cache.ledger_enabled", "vlsi.pd_cache.project",
+    "vlsi.substep_resume.enabled", "vlsi.substep_resume.db_checkpoints",
+    "vlsi.error_scan.enabled", "vlsi.error_scan.ignore", "vlsi.error_scan.fail_on",
+    "vlsi.core.airflow_dags_folder", "vlsi.core.airflow_dag_id",
+    "vlsi.core.airflow_edge", "vlsi.core.airflow_queue",
+})
+
+
 class HammerDatabase:
     """
     Define a database which is composed of a set of overridable configs.
@@ -1210,7 +1222,7 @@ class HammerDatabase:
 
         # Load or initialize master DB
         master_path = Path(filename)
-        _MASTER_DB_SKIP_KEYS = {"vlsi.hammer_dir"}
+        _MASTER_DB_SKIP_KEYS = {"vlsi.hammer_dir"} | RUN_CONTROL_KEYS
         master_db_contents: Optional[dict]
         try:
             text = master_path.read_text()

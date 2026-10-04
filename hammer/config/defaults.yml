@@ -50,6 +50,12 @@ vlsi.core:
 
   max_threads: 1 # Maximum threads to use in a CAD tool invocation.
 
+  # SledgeHammer DAG generation. None of these change a stage's results.
+  airflow_dags_folder: null # Folder the generated DAG is linked into (null: the folder `sledgehammer run` resolves).
+  airflow_dag_id: null # Airflow dag_id (null: sledgehammer_<design>_<user>).
+  airflow_edge: false # Run every task on an EdgeExecutor queue as the DAG owner.
+  airflow_queue: null # That queue's name (null: the generating user's name).
+
 vlsi.technology:
 # TODO ucb-bar/hammer#317 move these to technology.core (discussion to be had)
   placement_site: null # Placement site for macros. (Optional[str])
@@ -1005,3 +1011,19 @@ technology.pcb:
   bump_pad_metal_diameter: null # Desired pad metal diameter (in post-shrink um)
   # Typically this should be defined in the technology plugin, assuming everyone will use the same pad and board strategy
   # type: Decimal
+
+# SledgeHammer flow control. These choose how stages run, never what they
+# produce, so they are left out of the dependency check and the PD cache key.
+vlsi.pd_cache:
+  enabled: false # Use the Postgres PD cache. HAMMER_PD_CACHE=1 also turns it on.
+  ledger_enabled: true # Record time-saved events (HAMMER_PD_CACHE_LEDGER wins when set).
+  project: null # Project label for cache and ledger rows (HAMMER_PD_PROJECT wins when set).
+
+vlsi.substep_resume:
+  enabled: true # Resume a failed syn/par from its last confirmed checkpoint.
+  db_checkpoints: true # Keep sub-step checkpoints in the database too (HAMMER_DB_CHECKPOINTS wins when set).
+
+vlsi.error_scan:
+  enabled: true # Count tool **ERROR lines after syn and par (HAMMER_ERROR_SCAN wins when set).
+  ignore: [] # Error codes reviewed and accepted: counted but never fatal.
+  fail_on: [] # Error codes that fail syn or par even though the tool exited 0.

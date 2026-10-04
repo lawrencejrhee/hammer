@@ -62,14 +62,8 @@ def is_ledger_enabled(driver: Optional[Any] = None) -> bool:
     if env is not None:
         return env.strip().lower() not in ("", "0", "false", "no", "off")
     if driver is not None:
-        try:
-            val = driver.database.get_setting(LEDGER_SETTING_KEY, nullvalue=None)
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                return val.strip().lower() in ("1", "true", "yes", "on")
-        except Exception:
-            pass
+        from hammer.vlsi import sledge_settings
+        return sledge_settings.flag(driver, LEDGER_SETTING_KEY, True)
     return True
 
 
@@ -83,7 +77,8 @@ def stamp_project_from_config(driver: Optional[Any]) -> None:
     if os.environ.get(PROJECT_ENV_VAR) or driver is None:
         return
     try:
-        val = driver.database.get_setting(PROJECT_SETTING_KEY, nullvalue=None)
+        from hammer.vlsi import sledge_settings
+        val = sledge_settings.text(driver, PROJECT_SETTING_KEY)
         if val:
             os.environ[PROJECT_ENV_VAR] = str(val)
     except Exception:

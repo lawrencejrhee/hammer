@@ -603,10 +603,8 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         gen_user = os.environ.get("USER") or getpass.getuser()
     except Exception:
         gen_user = "unknown"
-    try:
-        dag_id_override = driver.database.get_setting("vlsi.core.airflow_dag_id")
-    except Exception:
-        dag_id_override = None
+    from hammer.vlsi import sledge_settings
+    dag_id_override = sledge_settings.text(driver, "vlsi.core.airflow_dag_id")
     unique_dag_id = re.sub(
         r"[^A-Za-z0-9_.-]", "_",
         str(dag_id_override) if dag_id_override
@@ -618,17 +616,11 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
     # vlsi.core.airflow_queue). The owner runs `studio-worker.sh` (or
     # `airflow edge worker --queues <name>`) as themselves; the shared
     # deployment then only schedules -- it never executes this DAG's tasks.
-    try:
-        edge_on = bool(driver.database.get_setting("vlsi.core.airflow_edge"))
-    except Exception:
-        edge_on = False
+    edge_on = sledge_settings.flag(driver, "vlsi.core.airflow_edge", False)
     edge_queue = None
     if edge_on:
-        try:
-            edge_queue = str(driver.database.get_setting("vlsi.core.airflow_queue"))
-        except Exception:
-            edge_queue = gen_user
-        edge_queue = re.sub(r"[^A-Za-z0-9_.-]", "_", edge_queue or gen_user)
+        edge_queue = sledge_settings.text(driver, "vlsi.core.airflow_queue") or gen_user
+        edge_queue = re.sub(r"[^A-Za-z0-9_.-]", "_", edge_queue)
 
     # 1. Base DAG Header & Safe Execution Subprocess Wrapper
     output = textwrap.dedent(f"""\

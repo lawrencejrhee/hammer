@@ -75,14 +75,8 @@ def is_enabled(driver: Optional[Any] = None) -> bool:
     if env is not None:
         return env.strip().lower() not in ("", "0", "false", "no", "off")
     if driver is not None:
-        try:
-            val = driver.database.get_setting(ENABLE_SETTING_KEY, nullvalue=None)
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                return val.strip().lower() in ("1", "true", "yes", "on")
-        except Exception:
-            pass
+        from hammer.vlsi import sledge_settings
+        return sledge_settings.flag(driver, ENABLE_SETTING_KEY, True)
     return True
 
 
@@ -282,14 +276,8 @@ def _db_enabled(driver: Optional[Any] = None) -> bool:
     if env is not None:
         return env.strip().lower() not in ("", "0", "false", "no", "off")
     if driver is not None:
-        try:
-            val = driver.database.get_setting(DB_ENABLE_SETTING_KEY, nullvalue=None)
-            if isinstance(val, bool):
-                return val
-            if isinstance(val, str):
-                return val.strip().lower() in ("1", "true", "yes", "on")
-        except Exception:
-            pass
+        from hammer.vlsi import sledge_settings
+        return sledge_settings.flag(driver, DB_ENABLE_SETTING_KEY, True)
     return True
 
 
@@ -297,7 +285,8 @@ def _provenance(driver: Any) -> dict:
     project = os.environ.get("HAMMER_PD_PROJECT")
     if not project:
         try:
-            project = driver.database.get_setting("vlsi.pd_cache.project", nullvalue=None)
+            from hammer.vlsi import sledge_settings
+            project = sledge_settings.text(driver, "vlsi.pd_cache.project")
         except Exception:
             project = None
     return {

@@ -45,6 +45,12 @@ vlsi.core:
   # Maximum threads to use in a CAD tool invocation.
   max_threads: int
 
+  # SledgeHammer DAG generation
+  airflow_dags_folder: Optional[str]
+  airflow_dag_id: Optional[str]
+  airflow_edge: bool
+  airflow_queue: Optional[str]
+
 vlsi.technology:
   # Placement site for macros. (Optional[str])
   placement_site: Optional[str]
@@ -666,3 +672,18 @@ technology.pcb:
   # Desired pad metal diameter (in post-shrink um)
   # type: Decimal
   bump_pad_metal_diameter: Optional[int]
+
+# SledgeHammer flow control
+vlsi.pd_cache:
+  enabled: bool
+  ledger_enabled: bool
+  project: Optional[str]
+
+vlsi.substep_resume:
+  enabled: bool
+  db_checkpoints: bool
+
+vlsi.error_scan:
+  enabled: bool
+  ignore: list[str]
+  fail_on: list[str]

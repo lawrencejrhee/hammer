@@ -65,6 +65,7 @@ except ImportError:
     Json = None      # type: ignore
 
 from hammer.config import HammerJSONEncoder
+from hammer.config.config_src import RUN_CONTROL_KEYS
 
 __all__ = [
     "store_par_input",
@@ -1514,7 +1515,7 @@ def _stage_relevant_keys(master_db: Dict[str, Any], stage_tag: str) -> Dict[str,
     )
     out: Dict[str, Any] = {}
     for k, v in master_db.items():
-        if k.endswith(".needsToRerun"):
+        if k.endswith(".needsToRerun") or k in RUN_CONTROL_KEYS:
             continue
         if k.startswith(own_prefix):
             if not k.startswith(output_prefix):
