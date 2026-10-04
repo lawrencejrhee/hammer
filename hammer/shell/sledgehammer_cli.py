@@ -419,6 +419,13 @@ def _cmd_run(args) -> int:
 
     if not os.path.exists(dag_file):
         _no_dag_exit(design, dag_file, dags_src)
+    baked = _dag_obj_dir(dag_file)
+    if baked and os.path.realpath(baked) != os.path.realpath(obj_dir) \
+            and os.path.isfile(os.path.join(obj_dir, "hammer_dag.py")):
+        sys.exit(
+            f"[sledgehammer] {dag_id} is registered for {baked}, not {obj_dir}.\n"
+            f"  Both builds are named {design}, and only the one generated last is registered.\n"
+            f"  Regenerate the DAG from {obj_dir} (make buildfile) to switch to it.")
 
     _airflow("dags", "unpause", dag_id)
     conf = {s: True for s in actions}

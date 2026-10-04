@@ -1554,8 +1554,17 @@ def _link_dag_into_dags_folder(driver, dag_file: str, dag_id: str) -> None:
             dags_folder = os.path.join(repo_root, "dags")
         os.makedirs(dags_folder, exist_ok=True)
         link = os.path.join(dags_folder, dag_id + ".py")
-        if os.path.lexists(link):
+        if os.path.islink(link):
+            old = os.path.realpath(link)
+            if old != os.path.realpath(dag_file) and os.path.exists(old):
+                print(f"NOTE: {dag_id} now builds {os.path.dirname(dag_file)} instead of "
+                      f"{os.path.dirname(old)}. Builds whose obj_dir has the same name share "
+                      f"one DAG id, so regenerate that one to switch back.")
             os.remove(link)
+        elif os.path.lexists(link):
+            backup = f"{link}.replaced-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            os.rename(link, backup)
+            print(f"NOTE: {link} was not a link from an earlier build; moved it to {backup}.")
         os.symlink(os.path.abspath(dag_file), link)
         print(f"Linked DAG into dags folder: {link} -> {dag_file}")
     except Exception as e:

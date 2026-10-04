@@ -78,3 +78,25 @@ class TestTopSelection:
         with pytest.raises(SystemExit, match="no DAG registered for Foo"):
             cli.main("syn", "-t", "Foo")
         assert not any(c[:2] == ("dags", "trigger") for c in cli.calls)
+
+
+class TestSameNameBuilds:
+    def _builds(self, cli):
+        for pdk in ("asap7", "sky130"):
+            (cli.tmp / pdk / "gcd").mkdir(parents=True)
+            (cli.tmp / pdk / "gcd" / "hammer_dag.py").write_text("")
+        cli.register("gcd", cli.tmp / "asap7" / "gcd")
+
+    def test_obj_dir_with_its_own_dag_is_not_served_by_another(self, cli) -> None:
+        self._builds(cli)
+        with pytest.raises(SystemExit, match="registered for .*asap7"):
+            cli.run("syn", "--obj_dir", str(cli.tmp / "sky130" / "gcd"))
+        assert not any(c[:2] == ("dags", "trigger") for c in cli.calls)
+
+    def test_obj_dir_matching_the_dag_triggers(self, cli) -> None:
+        self._builds(cli)
+        assert cli.run("syn", "--obj_dir", str(cli.tmp / "asap7" / "gcd")) == "sledgehammer_gcd_u"
+
+    def test_obj_dir_without_its_own_dag_still_triggers(self, cli) -> None:
+        self._builds(cli)
+        assert cli.run("syn", "--obj_dir", str(cli.tmp / "workspace" / "gcd")) == "sledgehammer_gcd_u"
