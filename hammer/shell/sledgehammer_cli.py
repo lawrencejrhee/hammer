@@ -330,6 +330,15 @@ def _infer_obj_dir():
     return None, None
 
 
+def _no_dag_exit(design, dag_file, dags_src):
+    sys.exit(
+        f"[sledgehammer] no DAG registered for {design}.\n"
+        f"  looked for: {dag_file}\n"
+        f"  (dags folder from {dags_src})\n"
+        f"  Generate it first, the same way you always have:\n"
+        f"      cd <vlsi dir> && make buildfile")
+
+
 def _cmd_run(args) -> int:
     import argparse
     import getpass
@@ -385,10 +394,13 @@ def _cmd_run(args) -> int:
     obj_dir = os.path.abspath(a.obj_dir) if a.obj_dir else None
     design = a.top
     if design and not obj_dir:
-        got = _dag_obj_dir(os.path.join(dags_folder, f"sledgehammer_{design}_{user}.py"))
+        named = os.path.join(dags_folder, f"sledgehammer_{design}_{user}.py")
+        if not os.path.exists(named):
+            _no_dag_exit(design, named, dags_src)
+        got = _dag_obj_dir(named)
         if got:
             obj_dir, src = got, "the registered DAG"
-    if not obj_dir:
+    if not obj_dir and not design:
         hit = _dag_for_cwd(dags_folder, user)
         if hit:
             design, obj_dir, src = hit[0], hit[1], "the registered DAG"
@@ -406,12 +418,7 @@ def _cmd_run(args) -> int:
     dag_file = os.path.join(dags_folder, f"{dag_id}.py")
 
     if not os.path.exists(dag_file):
-        sys.exit(
-            f"[sledgehammer] no DAG registered for {design}.\n"
-            f"  looked for: {dag_file}\n"
-            f"  (dags folder from {dags_src})\n"
-            f"  Generate it first, the same way you always have:\n"
-            f"      cd <vlsi dir> && make buildfile")
+        _no_dag_exit(design, dag_file, dags_src)
 
     _airflow("dags", "unpause", dag_id)
     conf = {s: True for s in actions}
