@@ -107,6 +107,18 @@ def dump_config_to_json_file(output_path: str, config: dict) -> None:
     with open(output_path, "w") as f:
         f.write(json.dumps(config, cls=HammerJSONEncoder, indent=4))
 
+def dump_config_to_json_file_if_changed(output_path: str, config: dict) -> None:
+    """Like dump_config_to_json_file, but leaves an identical file (and its mtime) alone."""
+    text = json.dumps(config, cls=HammerJSONEncoder, indent=4)
+    try:
+        with open(output_path, "r") as f:
+            if f.read() == text:
+                return
+    except OSError:
+        pass
+    with open(output_path, "w") as f:
+        f.write(text)
+
 def dump_config_to_yaml_file(output_path: str, config: dict) -> None:
     """
     Helper function to dump the given config in YAML form
@@ -887,31 +899,10 @@ class CLIDriver:
                     # in which case downstream stages won't find syn-output.json. Try restoring
                     # from the Postgres cache before declaring success-by-skip.
                     if driver.load_synthesis_tool(get_or_else(self.syn_rundir, "")):
-                        from hammer.vlsi.pd_cache import try_restore_from_cache
-                        try_restore_from_cache(
-                            driver, "synthesis",
-                            rundir=driver.syn_tool.run_dir,
-                            output_filename="syn-output.json",
-                        )
-                        # IMPORTANT: in the combined syn_par_action flow, the caller
-                        # immediately feeds our return value to
-                        # synthesis_output_to_par_input(), which expects a dict.
-                        # Returning a bare 0 here crashes par with
-                        # "'int' object is not subscriptable". So if the cache (or
-                        # the existing on-disk file) gave us a syn-output.json,
-                        # load it and return its contents like a normal run would.
-                        syn_output_path = os.path.join(
-                            driver.syn_tool.run_dir, "syn-output.json"
-                        )
-                        if os.path.exists(syn_output_path):
-                            try:
-                                with open(syn_output_path, "r") as f:
-                                    return json.load(f)
-                            except Exception as e:
-                                driver.log.warning(
-                                    f"Skip-path: found {syn_output_path} but failed to "
-                                    f"load it ({e}); returning empty success."
-                                )
+                        skipped = self._skip_path_output(driver, "synthesis", driver.syn_tool.run_dir, "syn",
+                                                         post_run_func_checked)
+                        if skipped is not None:
+                            return skipped
                     return 0
             elif action_type == "par":
                 if driver.database.stage_change_check(stage = "par", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun or self._explicit_flow_control):
@@ -1054,28 +1045,10 @@ class CLIDriver:
                     # stage_change_check says nothing changed. Try cache restore in case
                     # local par-rundir was wiped (see syn branch for full rationale).
                     if driver.load_par_tool(get_or_else(self.par_rundir, "")):
-                        from hammer.vlsi.pd_cache import try_restore_from_cache
-                        try_restore_from_cache(
-                            driver, "par",
-                            rundir=driver.par_tool.run_dir,
-                            output_filename="par-output.json",
-                        )
-                        # Same shape fix as the syn skip-path: if we restored
-                        # par-output.json, return its contents (not bare 0)
-                        # so that callers chaining further actions don't see
-                        # an int where they expect a dict.
-                        par_output_path = os.path.join(
-                            driver.par_tool.run_dir, "par-output.json"
-                        )
-                        if os.path.exists(par_output_path):
-                            try:
-                                with open(par_output_path, "r") as f:
-                                    return json.load(f)
-                            except Exception as e:
-                                driver.log.warning(
-                                    f"Skip-path: found {par_output_path} but failed to "
-                                    f"load it ({e}); returning empty success."
-                                )
+                        skipped = self._skip_path_output(driver, "par", driver.par_tool.run_dir, "par",
+                                                         post_run_func_checked)
+                        if skipped is not None:
+                            return skipped
                     return 0
             elif action_type == "drc":
                 if driver.database.stage_change_check(stage = "drc", filename = driver.obj_dir + "/master_database.json", force = self.force_rerun):
@@ -1784,6 +1757,36 @@ class CLIDriver:
         if "vlsi.builtins.is_complete" in output_full:
             del output_full["vlsi.builtins.is_complete"]
         return output_full
+
+    def _skip_path_output(self, driver: HammerDriver, stage_tag: str, run_dir: str, prefix: str,
+                          post_run: Callable[[HammerDriver], None]) -> Optional[dict]:
+        """
+        Output of a stage skipped as unchanged, restoring its rundir from the PD cache if it is gone.
+        Refreshes <prefix>-output-full.json from the current project config, since the bridges build
+        the next stage's input from it. Returns None when <prefix>-output.json is missing or unreadable.
+        """
+        from hammer.vlsi.pd_cache import try_restore_from_cache
+        output_name = f"{prefix}-output.json"
+        try_restore_from_cache(driver, stage_tag, rundir=run_dir, output_filename=output_name)
+        output_path = os.path.join(run_dir, output_name)
+        if not os.path.exists(output_path):
+            return None
+        try:
+            with open(output_path, "r") as f:
+                output = json.load(f)
+        except Exception as e:
+            driver.log.warning(f"Skip-path: found {output_path} but failed to load it ({e}).")
+            return None
+        if not isinstance(output, dict):
+            driver.log.warning(f"Skip-path: {output_path} does not hold a config.")
+            return None
+        post_run(driver)
+        try:
+            dump_config_to_json_file_if_changed(os.path.join(run_dir, f"{prefix}-output-full.json"),
+                                                self.get_full_config(driver, output))
+        except (ValueError, OSError) as e:
+            driver.log.warning(f"Skip-path: could not refresh {prefix}-output-full.json ({e}).")
+        return output
 
     def args_to_driver(self, args: dict,
                        default_options: Optional[HammerDriverOptions] = None) -> \
