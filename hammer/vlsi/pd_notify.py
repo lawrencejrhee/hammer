@@ -64,7 +64,8 @@ def _send_completion_email(to, subject, html):
     """Send one notification over SMTP, with the password read from a locked file.
 
     Host and sender come from SLEDGE_SMTP_* env vars; the password from the file
-    at SLEDGE_SMTP_PASSWORD_FILE. A no-op if no sender is configured. We use
+    at SLEDGE_SMTP_PASSWORD_FILE. Returns True once the server accepts the
+    message, False if no sender is configured; SMTP errors raise. We use
     smtplib directly because airflow's send_email only authenticates when an
     smtp_default Connection exists.
     """
@@ -76,7 +77,7 @@ def _send_completion_email(to, subject, html):
     pw_file = os.environ.get("SLEDGE_SMTP_PASSWORD_FILE")
     if not user or not pw_file:
         print("[notify] no SMTP sender configured (SLEDGE_SMTP_* unset); not sending")
-        return
+        return False
     host = os.environ.get("SLEDGE_SMTP_HOST", "smtp.gmail.com")
     port = int(os.environ.get("SLEDGE_SMTP_PORT", "587"))
     sender = os.environ.get("SLEDGE_SMTP_FROM") or user
@@ -98,7 +99,11 @@ def _send_completion_email(to, subject, html):
         server.login(user, password)
         server.send_message(msg)
     finally:
-        server.quit()
+        try:
+            server.quit()
+        except smtplib.SMTPException:
+            pass
+    return True
 
 
 def _outcomes_path(dag_id, run_id, create_dir=False):
@@ -183,8 +188,8 @@ def notify_run_finished(context, state, gen_user=None):
         stages = _stage_outcome_lines(dag_id, run_id)
         if stages:
             html += "<br><br>Stages:<br>" + "<br>".join(stages)
-        _send_completion_email(to, subject, html)
-        print(f"[notify] emailed {to} about {dag_id} {run_id} ({state})")
+        if _send_completion_email(to, subject, html):
+            print(f"[notify] emailed {to} about {dag_id} {run_id} ({state})")
     except Exception as e:
         print(f"[notify] FAILED to send completion mail for {dag_id} {run_id}: "
               f"{type(e).__name__}: {e}")
@@ -218,8 +223,8 @@ def notify_stage_finished(context, task_id, action, state, seconds, gen_user=Non
             f"Run: {run_id}<br><br>"
             "The full stage summary arrives when the run ends."
         )
-        _send_completion_email(to, subject, html)
-        print(f"[notify] emailed {to}: {task_id} {state} ({dur})")
+        if _send_completion_email(to, subject, html):
+            print(f"[notify] emailed {to}: {task_id} {state} ({dur})")
     except Exception as e:
         print(f"[notify] FAILED to send stage mail for {dag_id} {run_id} {task_id}: "
               f"{type(e).__name__}: {e}")

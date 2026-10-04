@@ -1869,17 +1869,22 @@ def _cmd_notify_test(args: argparse.Namespace) -> int:
                   f"register one:  studio notify-email {uid} you@example.com",
                   file=sys.stderr)
             return 2
-    if not os.environ.get("SLEDGE_SMTP_USER"):
+    if not (os.environ.get("SLEDGE_SMTP_USER") and os.environ.get("SLEDGE_SMTP_PASSWORD_FILE")):
         print("no SMTP sender configured; run:  studio smtp-setup --user <sender-address>",
               file=sys.stderr)
         return 2
     from hammer.vlsi.pd_notify import _send_completion_email
-    _send_completion_email(
-        to, "[SledgeHammer] test notification",
-        "<p>This is a test of the flow-completion email path. "
-        "If you are reading it, notifications work.</p>")
-    print(f"test email attempted to {to} -- check the inbox "
-          f"(errors above, if any, came from the SMTP server)")
+    try:
+        sent = _send_completion_email(
+            to, "[SledgeHammer] test notification",
+            "<p>This is a test of the flow-completion email path. "
+            "If you are reading it, notifications work.</p>")
+    except Exception as e:
+        print(f"test email to {to} failed: {e}", file=sys.stderr)
+        return 1
+    if not sent:
+        return 2
+    print(f"test email sent to {to}: the SMTP server accepted it, so check the inbox")
     return 0
 
 
