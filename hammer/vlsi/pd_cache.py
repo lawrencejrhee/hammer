@@ -120,7 +120,7 @@ CACHE_SETTING_KEY = "vlsi.pd_cache.enabled"
 def is_cache_enabled(driver: Optional[Any] = None) -> bool:
     """True if the env var or the driver's setting opts the cache on."""
     env = os.environ.get(CACHE_ENV_VAR, "")
-    if env not in ("", "0", "false", "False", "no"):
+    if env.strip().lower() not in ("", "0", "false", "no", "off"):
         return True
     if driver is not None:
         try:

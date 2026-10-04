@@ -1356,7 +1356,7 @@ class HammerDatabase:
         recoverable. Best-effort: database trouble must never fail a flow
         that already succeeded on disk.
         """
-        if os.environ.get("HAMMER_PD_CACHE", "") in ("", "0", "false", "False", "no"):
+        if os.environ.get("HAMMER_PD_CACHE", "").strip().lower() in ("", "0", "false", "no", "off"):
             return
         design = os.environ.get("HAMMER_AIRFLOW_DESIGN", "")
         if not design:
