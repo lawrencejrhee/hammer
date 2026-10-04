@@ -747,9 +747,9 @@ def try_restore_from_cache(
         original_cpu: Optional[float] = None
         try:
             key = _build_cache_key(driver, stage_tag)
-            blob_meta = pd_store.load_stage_blob(key)
-            if blob_meta is not None:
-                _, _, original_duration, original_cpu = blob_meta
+            runtime = pd_store.stage_blob_runtime(key)
+            if runtime is not None:
+                original_duration, original_cpu = runtime
                 if original_duration:
                     cpu_msg = (
                         f"; {_format_duration(original_cpu)} CPU"

@@ -1821,6 +1821,18 @@ def blob_created_at(sha256: str) -> Optional[float]:
         conn.close()
 
 
+def stage_blob_runtime(sha256: str) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    """(duration_seconds, cpu_seconds) of a stored blob without fetching its bytes, or None if absent."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT duration_seconds, cpu_seconds FROM {FQ_BLOB} WHERE sha256 = %s", (sha256,))
+            row = cur.fetchone()
+        return (row[0], row[1]) if row else None
+    finally:
+        conn.close()
+
+
 def load_stage_blob(
     sha256: str,
 ) -> Optional[Tuple[str, bytes, Optional[float], Optional[float]]]:
