@@ -1045,6 +1045,8 @@ def delete_stage_blobs(stage_tag: Optional[str] = None) -> int:
     """
     Delete rows from ``pd_blobs``. With no filter, deletes ALL rows.
     With ``stage_tag``, deletes only rows for that stage (e.g. 'synthesis').
+    Then drops every pd_blob_chunks row left without a parent, which also
+    clears chunks orphaned by earlier wipes.
 
     Returns the number of rows deleted.
     """
@@ -1060,7 +1062,11 @@ def delete_stage_blobs(stage_tag: Optional[str] = None) -> int:
                 )
             else:
                 cur.execute(f"DELETE FROM {FQ_BLOB}")
-            return cur.rowcount
+            n = cur.rowcount
+            cur.execute(
+                f"DELETE FROM {FQ_BLOB_CHUNK} c WHERE NOT EXISTS "
+                f"(SELECT 1 FROM {FQ_BLOB} b WHERE b.sha256 = c.sha256)")
+            return n
     finally:
         conn.close()
 
