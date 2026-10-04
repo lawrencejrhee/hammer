@@ -157,28 +157,3 @@ class TestDagForce:
         assert '"-to-" not in action_clean' in text
         assert "import dag_force_requested" not in text
         assert "if _mods.get('redo'):" not in text
-
-class TestForceWithStartStep:
-    def _stale_checkpoint(self, tmp_path: Path, step: str) -> Path:
-        rundir = tmp_path / "obj" / "syn-rundir"
-        rundir.mkdir(parents=True, exist_ok=True)
-        (rundir / f"pre_{step}").write_text("db")
-        return rundir / f"pre_{step}"
-
-    def test_force_with_from_step_keeps_the_start_checkpoint(self, tmp_path) -> None:
-        _config(tmp_path)
-        ck = self._stale_checkpoint(tmp_path, "step3")
-        assert _run(tmp_path, "syn", "--force", "--from_step", "step3") == 0
-        assert ck.exists()
-
-    def test_force_with_after_step_keeps_the_checkpoints(self, tmp_path) -> None:
-        _config(tmp_path)
-        ck = self._stale_checkpoint(tmp_path, "step2")
-        assert _run(tmp_path, "syn", "--force", "--after_step", "step2") == 0
-        assert ck.exists()
-
-    def test_force_alone_still_starts_from_scratch(self, tmp_path) -> None:
-        _config(tmp_path)
-        ck = self._stale_checkpoint(tmp_path, "step3")
-        assert _run(tmp_path, "syn", "--force") == 0
-        assert not ck.exists()

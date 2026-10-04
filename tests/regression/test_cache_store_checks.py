@@ -5,11 +5,17 @@ import pytest
 
 from hammer.config import HammerJSONEncoder
 from hammer.vlsi import CLIDriver, HammerDriver, HammerDriverOptions
-from hammer.vlsi import error_scan, pd_cache, pd_store
+from hammer.vlsi import error_scan, pd_cache, pd_store, rtl_check
+
+
+def _fixed_digest(paths, include_dirs=(), defines=(), top_module=None):
+    return "0" * 64, []
 
 
 @pytest.fixture
 def spies(tmp_path, monkeypatch):
+    monkeypatch.setattr(rtl_check, "digest_units", _fixed_digest)
+    monkeypatch.setattr(rtl_check, "digest_files", _fixed_digest)
     monkeypatch.setenv("HAMMER_PD_CACHE", "1")
     monkeypatch.setenv("HAMMER_DB_CHECKPOINTS", "0")
     monkeypatch.delenv("HAMMER_AIRFLOW_DESIGN", raising=False)
