@@ -24,8 +24,8 @@ Flow commands -- hammer's flags, the DAG as plumbing, no GUI required:
       Trigger and return immediately (prints the run id).
   cd vlsi && sledgehammer par-RocketTile
       The Makefile target names work verbatim: <stage>, <stage>-<module>,
-      and redo-<stage>[-<module>]. Run from the vlsi directory and
-      --obj_dir is inferred from the Makefile, exactly as make did.
+      and redo-<stage>[-<module>]. Run from the vlsi directory and the
+      DAG generated there is found with no flags; make never runs.
   sledgehammer par --force
       Rerun par even if nothing changed (redo-par is the same); stages before
       it still rerun only if they changed. --forceall reruns every stage the
@@ -259,12 +259,12 @@ def _dags_folder():
     return os.path.join(os.environ.get("AIRFLOW_HOME", REPO), "dags"), "$AIRFLOW_HOME/dags"
 
 
-def _dag_obj_dir(dag_file):
-    """OBJ_DIR baked into a generated DAG, or None."""
+def _dag_obj_dir(dag_file, key="OBJ_DIR"):
+    """OBJ_DIR (or another path, e.g. WORK_DIR) baked into a generated DAG, or None."""
     try:
         with open(dag_file) as f:
             for line in f:
-                if line.startswith("OBJ_DIR"):
+                if line.startswith(key):
                     return line.split("=", 1)[1].strip().strip("\"'")
     except OSError:
         return None
@@ -280,48 +280,38 @@ def _dag_supports_forceall(dag_file):
         return True
 
 
-def _dag_for_cwd(dags_folder, user):
-    """(design, obj_dir) for a registered DAG whose OBJ_DIR is under the cwd.
+def _dags_for_cwd(dags_folder, user):
+    """[(design, obj_dir)] for registered DAGs that build under the cwd or were generated from it.
 
     Lets `cd vlsi && sledgehammer par` find its own DAG with no flags and no
-    Makefile: the DAG that builds into this tree is the one meant.
+    Makefile, including one whose OBJ_DIR is on a scratch disk.
     """
-    here = os.path.abspath(os.getcwd())
+    here = os.path.realpath(os.getcwd())
     hits = []
     try:
-        names = os.listdir(dags_folder)
+        names = sorted(os.listdir(dags_folder))
     except OSError:
-        return None
+        return hits
     for fn in names:
         if not (fn.startswith("sledgehammer_") and fn.endswith(f"_{user}.py")):
             continue
-        od = _dag_obj_dir(os.path.join(dags_folder, fn))
-        if od and (os.path.abspath(od) + os.sep).startswith(here + os.sep):
+        path = os.path.join(dags_folder, fn)
+        od = _dag_obj_dir(path)
+        wd = _dag_obj_dir(path, "WORK_DIR")
+        if od and ((os.path.realpath(od) + os.sep).startswith(here + os.sep)
+                   or (wd and os.path.realpath(wd) == here)):
             hits.append((fn[len("sledgehammer_"):-len(f"_{user}.py")], od))
-    return hits[0] if len(hits) == 1 else None
+    return hits
 
 
 def _infer_obj_dir():
-    """Where `make` would have put this build, so --obj_dir is optional.
+    """Where the build lives when no registered DAG says so: $OBJ_DIR, else the only build/<x>.
 
-    Legacy flows ran `cd vlsi && make par` and the Makefile supplied OBJ_DIR.
-    Ask the Makefile the same question rather than guessing: --eval defines a
-    throwaway target that echoes the variable, so whatever logic the project
-    uses (VLSI_TOP, SETUP=dryrun, overrides on the command line) is honored.
-    Falls back to $OBJ_DIR, then to build/<x> when that is unambiguous.
+    Never asks make: GNU make remakes included makefiles before it reads any
+    goal, so even a probe would rebuild hammer.d and the DAG.
     """
     if os.environ.get("OBJ_DIR"):
         return os.environ["OBJ_DIR"], "$OBJ_DIR"
-    if os.path.exists("Makefile"):
-        try:
-            r = subprocess.run(
-                ["make", "--eval=__sledge_p:;@echo $(OBJ_DIR)", "__sledge_p"],
-                capture_output=True, text=True, timeout=60)
-            got = (r.stdout or "").strip().splitlines()
-            if r.returncode == 0 and got and got[-1].strip():
-                return got[-1].strip(), "Makefile"
-        except Exception:
-            pass
     if os.path.isdir("build"):
         subs = [d for d in sorted(os.listdir("build"))
                 if os.path.isdir(os.path.join("build", d))]
@@ -348,7 +338,7 @@ def _cmd_run(args) -> int:
     p.add_argument("actions", nargs="+",
                    help=f"stages to run: {', '.join(_STAGES)} (dashes ok)")
     p.add_argument("--obj_dir", help="build directory; taken from the "
-                   "registered DAG, or $OBJ_DIR / the Makefile, when omitted")
+                   "registered DAG, or $OBJ_DIR / the only build/<x>, when omitted")
     # hammer spells the design's top module -t/--top; --design is our alias
     p.add_argument("-t", "--top", "--design", dest="top",
                    help="top module / design name (default: obj_dir basename)")
@@ -389,8 +379,8 @@ def _cmd_run(args) -> int:
 
     # A registered DAG already carries its OBJ_DIR and design, baked in when it
     # was generated -- running one needs no Makefile and no working directory.
-    # Explicit flags win; the Makefile is only consulted when there is nothing
-    # registered yet and we are about to generate.
+    # Explicit flags win; otherwise the DAG that builds under, or was generated
+    # from, the cwd is the one meant.
     obj_dir = os.path.abspath(a.obj_dir) if a.obj_dir else None
     design = a.top
     if design and not obj_dir:
@@ -401,15 +391,19 @@ def _cmd_run(args) -> int:
         if got:
             obj_dir, src = got, "the registered DAG"
     if not obj_dir and not design:
-        hit = _dag_for_cwd(dags_folder, user)
-        if hit:
-            design, obj_dir, src = hit[0], hit[1], "the registered DAG"
+        hits = _dags_for_cwd(dags_folder, user)
+        if len(hits) > 1:
+            sys.exit(f"[sledgehammer] more than one registered DAG belongs to this directory: "
+                     f"{', '.join(d for d, _ in hits)}. Pick one with -t <design>.")
+        if hits:
+            design, obj_dir, src = hits[0][0], hits[0][1], "the registered DAG"
     if not obj_dir:
         obj_dir, src = _infer_obj_dir()
         if not obj_dir:
             sys.exit("[sledgehammer] could not work out obj_dir. Pass "
                      "--obj_dir, or -t <top> for a DAG that is already "
-                     "registered, or run from the vlsi directory.")
+                     "registered, or run from the vlsi directory.\n"
+                     "  No DAG yet? Generate it first: cd <vlsi dir> && make buildfile")
         obj_dir = os.path.abspath(obj_dir)
     if not a.obj_dir:
         print(f"[sledgehammer] obj_dir from {src}: {obj_dir}")

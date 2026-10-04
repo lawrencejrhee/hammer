@@ -100,3 +100,30 @@ class TestSameNameBuilds:
     def test_obj_dir_without_its_own_dag_still_triggers(self, cli) -> None:
         self._builds(cli)
         assert cli.run("syn", "--obj_dir", str(cli.tmp / "workspace" / "gcd")) == "sledgehammer_gcd_u"
+
+
+class TestNoMakeProbe:
+    def test_infer_obj_dir_never_runs_make(self, cli, monkeypatch) -> None:
+        monkeypatch.delenv("OBJ_DIR", raising=False)
+        (cli.vlsi / "Makefile").write_text("OBJ_DIR = build/x\n")
+        with pytest.raises(SystemExit, match="No DAG yet"):
+            cli.run("syn")
+        assert cli.ran == []
+
+    def test_two_cwd_dags_list_choices(self, cli) -> None:
+        cli.register("A", cli.vlsi / "build" / "A")
+        cli.register("B", cli.vlsi / "build" / "B")
+        with pytest.raises(SystemExit, match="A, B. Pick one with -t"):
+            cli.run("syn")
+        assert not any(c[:2] == ("dags", "trigger") for c in cli.calls)
+
+    def test_dag_generated_from_cwd_found_with_outside_obj_dir(self, cli) -> None:
+        (cli.tmp / "dags" / "sledgehammer_Top_u.py").write_text(
+            f'WORK_DIR = "{cli.vlsi}"\nOBJ_DIR = "{cli.tmp / "scratch" / "Top"}"\nforceall\n')
+        assert cli.run("syn") == "sledgehammer_Top_u"
+
+    def test_single_build_subdir_still_inferred(self, cli, monkeypatch) -> None:
+        monkeypatch.delenv("OBJ_DIR", raising=False)
+        (cli.vlsi / "build" / "Top").mkdir(parents=True)
+        cli.register("Top", cli.tmp / "elsewhere" / "Top")
+        assert cli.run("syn") == "sledgehammer_Top_u"
