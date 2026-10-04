@@ -664,7 +664,11 @@ def _cmd_workspace_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_workspace_show(args: argparse.Namespace) -> int:
-    root = pd_store.get_user_workspace(args.username, args.name)
+    root = pd_store.get_user_workspace(args.username, args.name, auto_register=False)
+    if root is None:
+        print(f"No workspace '{args.name}' registered for '{args.username}'. "
+              f"Set one: studio workspace-set {args.username} /path", file=sys.stderr)
+        return 1
     print(root)
     return 0
 
@@ -1440,7 +1444,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_ws_show = sub.add_parser(
         "workspace-show",
-        help="Print the workspace root for a user (auto-registers default if missing).",
+        help="Print a user's workspace root (read-only).",
     )
     p_ws_show.add_argument("username", help="Airflow LDAP username.")
     p_ws_show.add_argument(
@@ -1502,7 +1506,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "workspace-unset",
         help="Remove a user's workspace registration(s). With --name removes "
              "just that one; without it removes ALL of the user's workspaces. "
-             "The next call auto-registers a fresh default.",
+             "The user stays unregistered until a new `studio workspace-set`.",
     )
     p_ws_unset.add_argument("username")
     p_ws_unset.add_argument(
