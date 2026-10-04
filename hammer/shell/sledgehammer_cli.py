@@ -353,6 +353,9 @@ def _cmd_run(args) -> int:
                    help="rerun every stage this run executes, earlier ones included")
     p.add_argument("--local", action="store_true",
                    help="do not pull cached results from the PD store")
+    p.add_argument("--tools",
+                   help="tool config to build with, one of the DAG's Tools choices "
+                        "(default: the one the DAG was generated with)")
     p.add_argument("--workspace")
     p.add_argument("--project")
     p.add_argument("--start_before_step", "--from_step", "--from-step",
@@ -424,6 +427,8 @@ def _cmd_run(args) -> int:
               f"only {' '.join(actions)}.")
     if a.local:
         conf["local"] = True
+    if a.tools:
+        conf["tools"] = a.tools
     if a.workspace:
         conf["workspace"] = a.workspace
     if a.project:

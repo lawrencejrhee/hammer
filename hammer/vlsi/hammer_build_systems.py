@@ -668,6 +668,14 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         DEFAULT_TOOLS = "{default_tool}"
         TOOLS_CHOICES = sorted(PROJ_CONFS_BY_TOOLS.keys())
 
+        def _selected_proj_configs(context):
+            \"\"\"Project configs for the trigger's 'tools' choice: dag_run.conf, then params, then DEFAULT_TOOLS.\"\"\"
+            conf = context['dag_run'].conf or {{}}
+            choice = conf.get('tools') or (context.get('params') or {{}}).get('tools') or DEFAULT_TOOLS
+            if choice not in PROJ_CONFS_BY_TOOLS:
+                raise AirflowFailException(f"Unknown tools {{choice!r}}; choose one of {{TOOLS_CHOICES}}")
+            return PROJ_CONFS_BY_TOOLS[choice]
+
         # Per-user edge execution (vlsi.core.airflow_edge). When a queue is set,
         # every task in this DAG is routed to the EdgeExecutor on that queue, so
         # the DAG owner's own edge worker -- running as THEIR Unix user -- does
@@ -702,7 +710,6 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                 time so two users never share a build dir
               * cache provenance: the resolver also pins HAMMER_AIRFLOW_* env that
                 pd_cache stamps onto each stored blob
-              * tools selection: pick the project configs for the runtime 'tools' Param
             \"\"\"
             action_clean = str(action).strip()
             if action_clean.endswith("None"):
@@ -751,30 +758,6 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             cmd = [HAMMER_PY, HAMMER_EXEC]
             for env in ENV_CONFIGS:
                 cmd += ["-e", env]
-
-            # If extra_flags already carry explicit -p inputs, use them. Otherwise
-            # inject the project configs for the runtime 'tools' selection.
-            has_explicit_project_inputs = False
-            if extra_flags:
-                for flag in extra_flags:
-                    if flag == "-p" or flag == "--project_config":
-                        has_explicit_project_inputs = True
-                        break
-
-            if not has_explicit_project_inputs:
-                tools_choice = DEFAULT_TOOLS
-                if context is not None:
-                    try:
-                        conf = context['dag_run'].conf or {{}}
-                        tools_choice = (conf.get('tools')
-                                        or context.get('params', {{}}).get('tools')
-                                        or DEFAULT_TOOLS)
-                    except Exception:
-                        tools_choice = DEFAULT_TOOLS
-                proj_configs = PROJ_CONFS_BY_TOOLS.get(tools_choice,
-                                                       PROJ_CONFS_BY_TOOLS[DEFAULT_TOOLS])
-                for proj in proj_configs:
-                    cmd += ["-p", proj]
 
             if extra_flags and str(extra_flags) != "None":
                 cmd += extra_flags
@@ -920,6 +903,8 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         @task
         def sim_rtl(suffix, p_sim_rtl_in, sim_rtl_run_dir, **context):
             if should_run_stage('sim_rtl', context) or should_run_stage('power_rtl', context):
+                if p_sim_rtl_in == PROJ_CONFIGS:
+                    p_sim_rtl_in = _selected_proj_configs(context)
                 flags = []
                 for p in p_sim_rtl_in:
                     flags += ["-p", p]
@@ -945,6 +930,8 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         @task
         def syn(suffix, p_syn_in, **context):
             if should_run_stage('syn', context):
+                if p_syn_in == PROJ_CONFIGS:
+                    p_syn_in = _selected_proj_configs(context)
                 flags = []
                 for p in p_syn_in:
                     flags += ["-p", p]

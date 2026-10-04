@@ -114,3 +114,54 @@ class TestStepFlags:
     def test_step_flags_flat(self, dag) -> None:
         assert self._flags(dag, "syn", "syn") == ["--from_step", "syn_map"]
         assert self._flags(dag, "par", "syn") == []
+
+
+def _configs(cmd) -> list:
+    return [cmd[i + 1] for i, x in enumerate(cmd) if x == "-p"]
+
+
+class TestToolsParam:
+    def test_tools_param_selects_that_tools_configs(self, dag) -> None:
+        cmd = dag("syn", {"syn": True, "tools": "b"}, "", dag.ns["PROJ_CONFIGS"])
+        assert _configs(cmd) == [dag.b]
+
+    def test_tools_from_params_when_conf_has_none(self, dag) -> None:
+        cmd = dag("syn", {"syn": True}, "", dag.ns["PROJ_CONFIGS"], params={"tools": "b"})
+        assert _configs(cmd) == [dag.b]
+
+    def test_default_tools_command_unchanged(self, dag) -> None:
+        cmd = dag("syn", {"syn": True}, "", dag.ns["PROJ_CONFIGS"])
+        assert _configs(cmd) == dag.ns["PROJ_CONFIGS"] == [dag.a]
+
+    def test_sim_rtl_follows_the_tools_choice(self, dag) -> None:
+        cmd = dag("sim_rtl", {"sim_rtl": True, "tools": "b"}, "", dag.ns["PROJ_CONFIGS"], "/rundir",
+                  task_id="module_Top.sim_rtl")
+        assert _configs(cmd) == [dag.b]
+
+    def test_unknown_tools_fails_task(self, dag) -> None:
+        with pytest.raises(_FailException, match="zzz"):
+            dag("syn", {"syn": True, "tools": "zzz"}, "", dag.ns["PROJ_CONFIGS"])
+
+    def test_input_json_syn_ignores_tools(self, dag) -> None:
+        cmd = dag("syn", {"syn": True, "tools": "b"}, "", ["/obj/syn-Top-input.json"])
+        assert _configs(cmd) == ["/obj/syn-Top-input.json"]
+
+
+class TestRunToolsFlag:
+    def test_run_tools_flag_sets_conf(self, tmp_path, monkeypatch) -> None:
+        import getpass
+        from hammer.shell import sledgehammer_cli
+        dags = tmp_path / "dags"
+        dags.mkdir()
+        (dags / f"sledgehammer_Top_{getpass.getuser()}.py").write_text("'forceall': Param(default=False)")
+        calls = []
+
+        def fake_airflow(*a, capture=True):
+            calls.append(a)
+            return 0, "", ""
+
+        monkeypatch.setattr(sledgehammer_cli, "_airflow", fake_airflow)
+        monkeypatch.setattr(sledgehammer_cli, "_dags_folder", lambda: (str(dags), "test"))
+        assert sledgehammer_cli._cmd_run(["syn", "--tools", "or", "--obj_dir", str(tmp_path / "Top"), "--no-wait"]) == 0
+        trigger = next(c for c in calls if c[:2] == ("dags", "trigger"))
+        assert json.loads(trigger[trigger.index("-c") + 1]) == {"syn": True, "tools": "or"}
