@@ -808,8 +808,7 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             _is_stage_task = ("-to-" not in action_clean
                               and not action_clean.startswith("hier-")
                               and (action_clean == _steps_stage
-                                   or (action_clean.startswith(_steps_stage + "-")
-                                       and not action_clean.startswith(_steps_stage + "-par"))))
+                                   or action_clean.startswith(_steps_stage + "-")))
             if _is_stage_task:
                 for _flag in ("from_step", "to_step", "only_step"):
                     _val = str(_mods.get(_flag) or "").strip()
