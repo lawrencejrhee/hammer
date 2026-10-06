@@ -155,6 +155,17 @@ def _run_slang(paths: Sequence[str],
         cmd += list(paths)
 
         proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode < 0:
+            # slang parses on worker threads, and macOS gives those a small
+            # stack, so a deeply nested expression kills it with SIGBUS before
+            # its own --max-parse-depth check fires.  One thread keeps the work
+            # on the main stack; the AST JSON is the same either way.
+            proc = subprocess.run([binary, "--threads", "1"] + cmd[1:],
+                                  capture_output=True, text=True)
+        if proc.returncode < 0:
+            raise RtlParseError(paths[0] if paths else "<none>",
+                                f"slang crashed (signal {-proc.returncode}) even "
+                                f"single-threaded. {(proc.stderr or '').strip()}".rstrip())
         if proc.returncode != 0:
             # slang still writes a JSON file on error; it describes a design that
             # did not compile, so it must not be hashed.  Its own diagnostics
