@@ -2317,12 +2317,54 @@ def _discard(path: Path) -> None:
         pass
 
 
+def _inside(root: str, path: str) -> bool:
+    real = os.path.realpath(path)
+    return real == root or real.startswith(root + os.sep)
+
+
+def _hard_link_escapes(member: tarfile.TarInfo, root: str) -> bool:
+    """A hard link's target is archive-relative; it must stay under ``root``."""
+    return member.islnk() and (os.path.isabs(member.linkname)
+                               or not _inside(root, os.path.join(root, member.linkname)))
+
+
+def _tar_filter_and_hard_links(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
+    filtered = tarfile.tar_filter(member, path)  # type: ignore[attr-defined]
+    if _hard_link_escapes(member, os.path.realpath(path)):
+        # A FilterError subclass: extractall's default errorlevel swallows a
+        # plain ExtractError raised here and would just skip the member.
+        raise tarfile.LinkOutsideDestinationError(  # type: ignore[attr-defined]
+            member, os.path.join(path, member.linkname))
+    return filtered
+
+
+def _extract_like_tar_filter(tar: tarfile.TarFile, dest: Path) -> None:
+    """Extract ``tar`` into ``dest`` with the checks of tarfile's "tar" filter.
+
+    Each member is checked just before it is written, so a name that resolves
+    through a symlink extracted earlier in the same archive is caught too.
+    """
+    root = os.path.realpath(dest)
+    for member in tar.getmembers():
+        if os.path.isabs(member.name) or not _inside(root, os.path.join(root, member.name)):
+            raise tarfile.ExtractError(f"refusing to extract {member.name!r} outside {dest}")
+        if _hard_link_escapes(member, root):
+            raise tarfile.ExtractError(f"refusing hard link {member.name!r} -> {member.linkname!r}")
+        if member.ischr() or member.isblk() or member.isfifo():
+            raise tarfile.ExtractError(f"refusing special file {member.name!r}")
+        member.mode &= 0o755
+        tar.extract(member, path=root)
+
+
 def untar_to_directory(data: bytes, dest: Path) -> None:
     """Extract a gzip tar into ``dest``. ``dest`` is created if it doesn't exist.
 
     Blobs come from teammates via the shared cache, so member names must not
     be able to write outside ``dest``: the "tar" filter strips absolute paths
-    and refuses ``..`` traversal. The stricter "data" filter would also reject
+    and refuses ``..`` traversal, and _hard_link_escapes adds the one check it
+    lacks: a hard link to a file outside ``dest`` (``/home/me/.bashrc`` or
+    ``../../x``) would let a later in-place write to the rundir rewrite that
+    file, and a re-cache upload it. The stricter "data" filter would also reject
     symlinks with absolute targets, which rundirs legitimately contain (the
     innovus ``post_*`` links point at absolute paths), so it would break par
     restores.
@@ -2341,10 +2383,12 @@ def untar_to_directory(data: bytes, dest: Path) -> None:
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             if hasattr(tarfile, "tar_filter"):
-                tar.extractall(path=str(staging), filter="tar")
+                tar.extractall(path=str(staging), filter=_tar_filter_and_hard_links)
             else:
-                # Python without the extraction-filter backport (pre 3.9.17 line).
-                tar.extractall(path=str(staging))
+                # Python without the extraction-filter backport (macOS's system
+                # 3.9.6, anything before 3.9.17). A bare extractall would honor
+                # "../" member names, so apply the same rules by hand.
+                _extract_like_tar_filter(tar, staging)
 
         for entry in staging.iterdir():
             target = dest / entry.name
