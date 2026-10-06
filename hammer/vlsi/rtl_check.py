@@ -65,7 +65,7 @@ def _repo_bundled_slang() -> Optional[str]:
     here = os.path.dirname(os.path.realpath(__file__))
     repo = os.path.dirname(os.path.dirname(here))
     candidate = os.path.join(repo, "tools", "slang", "slang")
-    return candidate if os.path.isfile(candidate) else None
+    return candidate if os.path.isfile(candidate) and os.access(candidate, os.X_OK) else None
 
 
 def slang_binary() -> str:
@@ -77,8 +77,8 @@ def slang_binary() -> str:
     """
     env = os.environ.get("SLANG_BIN")
     if env:
-        if not os.path.isfile(env):
-            raise SlangNotFound(f"$SLANG_BIN={env!r} is not a file. {_INSTALL_HINT}")
+        if not os.path.isfile(env) or not os.access(env, os.X_OK):
+            raise SlangNotFound(f"$SLANG_BIN={env!r} is not an executable file. {_INSTALL_HINT}")
         return env
     found = shutil.which("slang") or _repo_bundled_slang()
     if not found:
@@ -88,8 +88,13 @@ def slang_binary() -> str:
 
 def slang_version(binary: Optional[str] = None) -> str:
     """The ``MAJOR.MINOR`` version the binary reports."""
-    out = subprocess.run([binary or slang_binary(), "--version"],
-                         capture_output=True, text=True).stdout
+    binary = binary or slang_binary()
+    try:
+        out = subprocess.run([binary, "--version"], capture_output=True, text=True).stdout
+    except OSError as e:
+        # Executable bit set but not runnable here, e.g. a Linux build in a
+        # checkout shared with a Mac: treat it as missing so callers fall back.
+        raise SlangNotFound(f"{binary} cannot run ({e}). {_INSTALL_HINT}") from e
     # "slang version 11.0.0+7ddf4059f"
     m = re.search(r"(\d+)\.(\d+)", out)
     return f"{m.group(1)}.{m.group(2)}" if m else out.strip()
