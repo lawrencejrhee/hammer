@@ -494,8 +494,10 @@ def _cmd_status(args, list_only=False) -> int:
         dag_ids = [f"sledgehammer_{a.design}_{user}"]
     else:
         _, out, _ = _airflow("dags", "list", "-o", "plain")
+        # match the _<user> suffix, not a substring: user "u" must not see
+        # sledgehammer_Top_uma
         dag_ids = [l.split()[0] for l in out.splitlines()
-                   if l.startswith("sledgehammer_") and user in l]
+                   if l.startswith("sledgehammer_") and l.split()[0].endswith(f"_{user}")]
     for dag_id in dag_ids:
         _, out, _ = _airflow("dags", "list-runs", dag_id, "-o", "plain")
         rows = [l.split() for l in out.splitlines()[1:] if l.split()]
@@ -504,7 +506,7 @@ def _cmd_status(args, list_only=False) -> int:
             continue
         if list_only:
             for r in rows:
-                print(f"  {dag_id.replace('sledgehammer_', '').replace('_' + user, ''):18s} "
+                print(f"  {dag_id[len('sledgehammer_'):-len('_' + user)]:18s} "
                       f"{r[1]:44s} {r[2]}")
             continue
         rid = a.run_id or rows[0][1]
