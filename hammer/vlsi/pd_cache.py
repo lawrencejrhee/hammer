@@ -215,11 +215,15 @@ def _run_with_checkpoint_stream(driver, stage_tag, rundir, run_fn):
                                 stamp.write_text(f"{cpu_now:.3f}\n")
                             except OSError:
                                 pass
+                # Remember the newest checkpoint seen, not the step pushed: the
+                # push clamps to the resume ceiling and returns None when it
+                # refuses (oversized, key moved), and either way comparing
+                # against it re-tarred and re-uploaded the same multi-GB
+                # checkpoint every interval for the rest of the run.
                 if confirmed and confirmed[-1] != last:
-                    pushed = substep_resume.push_checkpoint_db(
+                    last = confirmed[-1]
+                    substep_resume.push_checkpoint_db(
                         driver, stage_tag, rundir, log_name, module=module)
-                    if pushed:
-                        last = pushed
             except Exception:
                 pass
 
