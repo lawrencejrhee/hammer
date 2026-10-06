@@ -14,6 +14,10 @@ import warnings
 
 import pytest
 
+# The Airflow web stack (Flask-AppBuilder) is not a hammer dependency; these
+# run where the studio's webserver is installed.
+pytest.importorskip("flask_appbuilder")
+
 warnings.filterwarnings("ignore")
 
 
