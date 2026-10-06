@@ -171,7 +171,7 @@ def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=N
               f"Falling back to the DAG's baked OBJ_DIR.")
         return None
     if not workspace_root:
-        raise RuntimeError(
+        raise WorkspaceNotRegistered(
             f"no workspace registered for user {user!r} (workspace {ws_name!r}). "
             f"Register one first:  studio workspace-set {user} /path/to/their/build"
         )
@@ -193,6 +193,15 @@ def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=N
 
 
 RUN_LOCK_NAME = ".sledgehammer-run.lock"
+
+
+class WorkspaceNotRegistered(RuntimeError):
+    """Someone other than the DAG's owner triggered it and has no workspace.
+
+    Like RunLockConflict, the generated DAGs re-raise it: falling back to the
+    baked OBJ_DIR would run this user's build in the owner's directory, without
+    the run lock.
+    """
 
 
 class RunLockConflict(RuntimeError):

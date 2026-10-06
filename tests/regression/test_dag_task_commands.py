@@ -165,3 +165,50 @@ class TestRunToolsFlag:
         assert sledgehammer_cli._cmd_run(["syn", "--tools", "or", "--obj_dir", str(tmp_path / "Top"), "--no-wait"]) == 0
         trigger = next(c for c in calls if c[:2] == ("dags", "trigger"))
         assert json.loads(trigger[trigger.index("-c") + 1]) == {"syn": True, "tools": "or"}
+
+
+class TestNonOwnerWorkspace:
+    """A non-owner with no registered workspace must not run in the owner's baked OBJ_DIR."""
+
+    def _resolver_raises(self, monkeypatch, exc) -> None:
+        import hammer.shell.hammer_vlsi as hammer_vlsi
+
+        def resolve(*a, **k):
+            raise exc
+
+        monkeypatch.setattr(hammer_vlsi, "_resolve_workspace_obj_dir", resolve)
+
+    def test_an_unregistered_user_fails_the_task(self, dag, monkeypatch) -> None:
+        import hammer.shell.hammer_vlsi as hammer_vlsi
+        self._resolver_raises(monkeypatch, hammer_vlsi.WorkspaceNotRegistered("no workspace registered for 'bob'"))
+        with pytest.raises(hammer_vlsi.WorkspaceNotRegistered):
+            dag("run_hammer_action", {}, "syn", ["-p", "x.json"])
+
+    def test_a_lock_conflict_still_fails_the_task(self, dag, monkeypatch) -> None:
+        import hammer.shell.hammer_vlsi as hammer_vlsi
+        self._resolver_raises(monkeypatch, hammer_vlsi.RunLockConflict("held"))
+        with pytest.raises(hammer_vlsi.RunLockConflict):
+            dag("run_hammer_action", {}, "syn", ["-p", "x.json"])
+
+    def test_resolver_infrastructure_trouble_falls_back(self, dag, monkeypatch) -> None:
+        self._resolver_raises(monkeypatch, ImportError("no psycopg2"))
+        cmd = dag("run_hammer_action", {}, "syn", ["-p", "x.json"])
+        assert cmd is not None
+
+
+def test_the_resolver_raises_for_an_unregistered_non_owner(monkeypatch, tmp_path) -> None:
+    import hammer.shell.hammer_vlsi as hammer_vlsi
+    from hammer.vlsi import pd_store
+    monkeypatch.setattr(pd_store, "get_user_workspace", lambda *a, **k: None)
+    # The resolver stamps these for the cache layer; setenv first so they are restored.
+    for key in ("HAMMER_AIRFLOW_DAG_ID", "HAMMER_AIRFLOW_RUN_ID", "HAMMER_AIRFLOW_TRIGGERING_USER",
+                "HAMMER_AIRFLOW_DESIGN", "OBJ_DIR"):
+        monkeypatch.setenv(key, "")
+    monkeypatch.delenv("HAMMER_NO_PER_USER_WORKSPACE", raising=False)
+    monkeypatch.delenv("HAMMER_WORKSPACE", raising=False)
+    context = {"dag_run": types.SimpleNamespace(conf={}, dag_id="sledgehammer_Top_alice", run_id="r1",
+                                                triggering_user_name="bob"),
+               "params": {}}
+    with pytest.raises(hammer_vlsi.WorkspaceNotRegistered, match="studio workspace-set"):
+        hammer_vlsi._resolve_workspace_obj_dir(context, "Top", default_obj_dir=str(tmp_path / "alice"),
+                                               gen_user="alice", claim=False)
