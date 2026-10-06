@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -741,6 +742,13 @@ def _cmd_blob_list(args: argparse.Namespace) -> int:
 
 # ---- Filter-based management: blob-find / blob-delete / blob-reassign ----
 
+def _hex_prefix(value: str) -> str:
+    """argparse type for --sha: an empty or wildcard prefix would match every blob."""
+    if not re.fullmatch(r"[0-9a-fA-F]+", value):
+        raise argparse.ArgumentTypeError(f"expected hex digits, got {value!r}")
+    return value
+
+
 def _blob_filter_kwargs(args: argparse.Namespace) -> dict:
     """Pull the shared filter flags off ``args`` into pd_store filter kwargs."""
     return {
@@ -1349,7 +1357,7 @@ def _build_parser() -> argparse.ArgumentParser:
         g.add_argument("--before", metavar="DATE",
                        help="created_at < DATE (e.g. 2026-06-01 or 2026-06-01T12:00)")
         g.add_argument("--after", metavar="DATE", help="created_at >= DATE")
-        g.add_argument("--sha", help="sha256 prefix")
+        g.add_argument("--sha", type=_hex_prefix, help="sha256 prefix (hex digits)")
 
     p_bfind = sub.add_parser(
         "blob-find",

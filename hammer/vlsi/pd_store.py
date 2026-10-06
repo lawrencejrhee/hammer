@@ -1207,8 +1207,12 @@ def _blob_filter_sql(
         clauses.append("created_at < %s::timestamptz")
         params.append(before)
     if sha is not None:
-        clauses.append("sha256 LIKE %s")
-        params.append(sha + "%")
+        # A bare LIKE would let "" (or "%") match every blob and slip past the
+        # callers' "refuse with no filter" guard.
+        if not re.fullmatch(r"[0-9a-fA-F]+", sha):
+            raise ValueError(f"--sha must be a non-empty hex prefix, got {sha!r}")
+        clauses.append("left(sha256, %s) = %s")
+        params.extend([len(sha), sha.lower()])
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     return where, params, len(clauses)
 

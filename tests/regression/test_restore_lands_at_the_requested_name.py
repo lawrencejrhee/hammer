@@ -10,6 +10,7 @@ import tarfile
 
 import pytest
 
+from hammer.vlsi import pd_store
 from hammer.vlsi.pd_store import materialize_checkpoint, tar_directory, untar_to_directory
 
 
@@ -69,3 +70,15 @@ def test_a_directory_checkpoint_writes_only_its_pre_step(tmp_path):
     assert dest == rundir / "pre_place_opt"
     assert (dest / "db").read_text() == "ckpt\n"
     assert (rundir / "syn-output.json").read_text() == "keep\n"
+
+
+@pytest.mark.parametrize("sha", ["", "%", "ab_", "zz"])
+def test_a_non_hex_sha_filter_is_refused(sha):
+    with pytest.raises(ValueError):
+        pd_store._blob_filter_sql(sha=sha)
+
+
+def test_a_sha_prefix_filter_matches_by_prefix_only():
+    where, params, n = pd_store._blob_filter_sql(sha="AbC1")
+    assert n == 1 and "LIKE" not in where
+    assert params == [4, "abc1"]
