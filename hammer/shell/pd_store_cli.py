@@ -189,7 +189,7 @@ def _cmd_stage_pull(args: argparse.Namespace) -> int:
             return 2
         shutil.rmtree(rundir)
     rundir.parent.mkdir(parents=True, exist_ok=True)
-    pd_store.untar_to_directory(data, rundir.parent)
+    pd_store.untar_to_directory(data, rundir.parent, as_name=rundir.name)
     print(f"sha256={sha} stage={stored_stage} extracted to {rundir}")
     return 0
 

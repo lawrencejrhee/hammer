@@ -2356,8 +2356,14 @@ def _extract_like_tar_filter(tar: tarfile.TarFile, dest: Path) -> None:
         tar.extract(member, path=root)
 
 
-def untar_to_directory(data: bytes, dest: Path) -> None:
+def untar_to_directory(data: bytes, dest: Path, as_name: Optional[str] = None) -> None:
     """Extract a gzip tar into ``dest``. ``dest`` is created if it doesn't exist.
+
+    With ``as_name``, the archive must hold exactly one top-level entry, and it
+    lands at ``dest/as_name`` whatever it was called when tarred. Restores pass
+    the rundir they were asked for, so a blob named ``syn-rundir`` cannot
+    replace a sibling of ``my-syn``, and a checkpoint cannot write anything
+    beside its own ``pre_<step>``.
 
     Blobs come from teammates via the shared cache, so member names must not
     be able to write outside ``dest``: the "tar" filter strips absolute paths
@@ -2390,7 +2396,17 @@ def untar_to_directory(data: bytes, dest: Path) -> None:
                 # "../" member names, so apply the same rules by hand.
                 _extract_like_tar_filter(tar, staging)
 
-        for entry in staging.iterdir():
+        entries = sorted(staging.iterdir())
+        if as_name is not None:
+            if len(entries) != 1:
+                raise ValueError(f"expected one top-level entry to restore as {as_name!r}, "
+                                 f"found {sorted(e.name for e in entries)}")
+            if as_name != entries[0].name:
+                renamed = staging / f".as-{os.getpid()}" / as_name
+                renamed.parent.mkdir()
+                os.replace(entries[0], renamed)
+                entries = [renamed]
+        for entry in entries:
             target = dest / entry.name
             displaced = dest / f"{entry.name}.replaced-{os.getpid()}"
             _discard(displaced)

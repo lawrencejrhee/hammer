@@ -488,7 +488,7 @@ def cache_or_run(
         _check_restore_allowed(rundir_path)
         try:
             rundir_path.parent.mkdir(parents=True, exist_ok=True)
-            pd_store.untar_to_directory(data, rundir_path.parent)
+            pd_store.untar_to_directory(data, rundir_path.parent, as_name=rundir_path.name)
             _rebase_restored_paths(rundir_path, output_filename, _info, _warn)
             output_path = rundir_path / output_filename
             with output_path.open("r") as f:
@@ -718,7 +718,7 @@ def try_restore_from_cache(
     _check_restore_allowed(rundir_path)
     try:
         rundir_path.parent.mkdir(parents=True, exist_ok=True)
-        pd_store.untar_to_directory(data, rundir_path.parent)
+        pd_store.untar_to_directory(data, rundir_path.parent, as_name=rundir_path.name)
         _rebase_restored_paths(rundir_path, output_filename, _info, _warn)
         restore_seconds = time.monotonic() - _restore_t0
         saved = None
