@@ -1,14 +1,16 @@
 """A restore lands at the rundir it was asked for and nowhere else.
 
-Stage blobs come from a table every group member can write, so the
-archive's top-level name may not choose where data lands.
+Stage blobs and checkpoints come from a table every group member can write,
+so neither the archive's top-level name nor a checkpoint's step may choose
+where data lands.
 """
+import gzip
 import io
 import tarfile
 
 import pytest
 
-from hammer.vlsi.pd_store import tar_directory, untar_to_directory
+from hammer.vlsi.pd_store import materialize_checkpoint, tar_directory, untar_to_directory
 
 
 def _rundir(root, name="syn-rundir", text="fresh\n"):
@@ -42,3 +44,28 @@ def test_a_blob_with_two_top_level_entries_is_refused(tmp_path):
     with pytest.raises(ValueError, match="one top-level entry"):
         untar_to_directory(buf.getvalue(), dest, as_name="syn-rundir")
     assert list(dest.iterdir()) == []
+
+
+@pytest.mark.parametrize("step", ["place/../../../victim", "../x", "", "a b", None])
+def test_a_hostile_checkpoint_step_is_refused(tmp_path, step):
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("keep\n")
+    rundir = tmp_path / "obj" / "par-rundir"
+    (rundir / "pre_place").mkdir(parents=True)
+    rec = {"step": step, "is_dir": False, "data": gzip.compress(b"pwned")}
+    with pytest.raises(ValueError, match="step name"):
+        materialize_checkpoint(rec, rundir)
+    assert (victim / "keep.txt").read_text() == "keep\n"
+
+
+def test_a_directory_checkpoint_writes_only_its_pre_step(tmp_path):
+    src = tmp_path / "src"
+    (src / "pre_place_opt").mkdir(parents=True)
+    (src / "pre_place_opt" / "db").write_text("ckpt\n")
+    rundir = _rundir(tmp_path, "par-rundir", "keep\n")
+    data = tar_directory(src / "pre_place_opt", arcname="syn-output.json")  # lies about its name
+    dest = materialize_checkpoint({"step": "place_opt", "is_dir": True, "data": data}, rundir)
+    assert dest == rundir / "pre_place_opt"
+    assert (dest / "db").read_text() == "ckpt\n"
+    assert (rundir / "syn-output.json").read_text() == "keep\n"

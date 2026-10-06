@@ -42,6 +42,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import tarfile
 import tempfile
@@ -2232,15 +2233,23 @@ def fetch_checkpoint(stage_key: Optional[str] = None, step: Optional[str] = None
             return rec
 
 
+_STEP_NAME = re.compile(r"[A-Za-z0-9_]+")
+
+
 def materialize_checkpoint(rec: Dict[str, Any], rundir: Path) -> Path:
-    """Write a fetched checkpoint back into a rundir as pre_<step>."""
+    """Write a fetched checkpoint back into a rundir as pre_<step>.
+
+    The row comes from a table every group member can write, so the step must
+    be a plain tool step name before it becomes a path.
+    """
+    step = rec["step"]
+    if not isinstance(step, str) or not _STEP_NAME.fullmatch(step):
+        raise ValueError(f"refusing checkpoint with step name {step!r}")
     rundir = Path(rundir)
     rundir.mkdir(parents=True, exist_ok=True)
-    dest = rundir / f"pre_{rec['step']}"
+    dest = rundir / f"pre_{step}"
     if rec["is_dir"]:
-        if dest.exists():
-            shutil.rmtree(dest, ignore_errors=True)
-        untar_to_directory(rec["data"], rundir)
+        untar_to_directory(rec["data"], rundir, as_name=dest.name)
     else:
         dest.write_bytes(gzip.decompress(rec["data"]))
     return dest
