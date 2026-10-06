@@ -171,9 +171,20 @@ def walk_dir(path: str, roots: Roots = (), recursive: bool = True, cap: int = DI
     if not os.path.isdir(path):
         return [file_line(path, roots, memo)]
     found: List[Tuple[str, os.stat_result]] = []
-    for dirpath, dirnames, filenames in os.walk(path):
-        dirnames[:] = sorted(d for d in dirnames
-                             if not skip_name(d) and not (prune is not None and prune(os.path.join(dirpath, d))))
+    # Follow symlinked subdirectories (a generated-src or shared include tree is
+    # often linked in), visiting each real directory once so a link loop ends.
+    seen = {os.path.realpath(path)}
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=True):
+        kept = []
+        for d in sorted(dirnames):
+            full_dir = os.path.join(dirpath, d)
+            if skip_name(d) or (prune is not None and prune(full_dir)):
+                continue
+            real = os.path.realpath(full_dir)
+            if real not in seen:
+                seen.add(real)
+                kept.append(d)
+        dirnames[:] = kept
         for name in sorted(filenames):
             if skip_name(name) or (skip is not None and skip(name)):
                 continue
