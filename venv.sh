@@ -1,4 +1,12 @@
-_sledge_repo="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# This file's own path: BASH_SOURCE in bash, the %x prompt escape in zsh
+# (eval'd so bash never parses the zsh-only expansion).
+if [ -n "${ZSH_VERSION:-}" ]; then
+    eval '_sledge_src="${(%):-%x}"'
+else
+    _sledge_src="${BASH_SOURCE[0]}"
+fi
+_sledge_repo="$(CDPATH= cd -- "$(dirname -- "$_sledge_src")" && pwd)"
+unset _sledge_src
 
 # Ensure uv and pg_config are on PATH, behind the venv activated next
 export PATH="$HOME/pg_local/usr/bin:$HOME/.local/bin:$PATH"
@@ -57,22 +65,25 @@ _sledge_load_secrets() {
 if [ -n "${LD_LIBRARY_PATH:-}" ]; then
     _sledge_clean=""
     _sledge_dropped=""
-    _sledge_ifs=$IFS; IFS=:
-    for _p in $LD_LIBRARY_PATH; do
+    # One entry per line through a heredoc, not `for _p in $LD_LIBRARY_PATH`:
+    # zsh does not word-split, so that loop saw the whole value as one entry
+    # and a single conda dir dropped every other entry with it.
+    while IFS= read -r _p; do
         case "$_p" in
             *[Cc]onda*|"${CONDA_PREFIX:-/nonexistent-conda}"/*)
                 _sledge_dropped="$_sledge_dropped $_p" ;;
             *)
                 _sledge_clean="${_sledge_clean:+$_sledge_clean:}$_p" ;;
         esac
-    done
-    IFS=$_sledge_ifs
+    done <<_SLEDGE_EOF
+$(printf '%s\n' "$LD_LIBRARY_PATH" | tr ':' '\n')
+_SLEDGE_EOF
     if [ -n "$_sledge_dropped" ]; then
         export LD_LIBRARY_PATH="$_sledge_clean"
         echo "[sledge] removed conda entries from LD_LIBRARY_PATH (their libcrypto.so.3"
         echo "         breaks the system libldap, which breaks psycopg2):$_sledge_dropped"
     fi
-    unset _sledge_clean _sledge_dropped _sledge_ifs _p
+    unset _sledge_clean _sledge_dropped _p
 fi
 
 # Preflight: if psycopg2 still cannot load, explain why in one screen instead
@@ -86,11 +97,12 @@ if ! python3 -c "import psycopg2" >/dev/null 2>&1; then
             echo "         This is a library conflict: your environment loads a foreign" >&2
             echo "         OpenSSL ahead of the system one. Likely causes:" >&2
             [ -n "${CONDA_PREFIX:-}" ] &&                 echo "           - active conda env: $CONDA_PREFIX  (fix: conda deactivate, open a fresh shell)" >&2
-            _sledge_ifs=$IFS; IFS=:
-            for _p in ${LD_LIBRARY_PATH:-}; do
-                [ -e "$_p/libcrypto.so.3" ] &&                     echo "           - LD_LIBRARY_PATH entry shipping its own libcrypto.so.3: $_p" >&2
-            done
-            IFS=$_sledge_ifs; unset _sledge_ifs _p
+            while IFS= read -r _p; do
+                [ -n "$_p" ] && [ -e "$_p/libcrypto.so.3" ] &&                     echo "           - LD_LIBRARY_PATH entry shipping its own libcrypto.so.3: $_p" >&2
+            done <<_SLEDGE_EOF
+$(printf '%s\n' "${LD_LIBRARY_PATH:-}" | tr ':' '\n')
+_SLEDGE_EOF
+            unset _p
             _sledge_pg=$(ls "$VIRTUAL_ENV"/lib/python*/site-packages/psycopg2/_psycopg*.so 2>/dev/null | head -1)
             if [ -n "$_sledge_pg" ]; then
                 _sledge_rp=$(readelf -d "$_sledge_pg" 2>/dev/null | grep -E "RPATH|RUNPATH" | grep -io "conda[^]]*")
