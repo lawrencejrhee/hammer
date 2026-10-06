@@ -80,3 +80,17 @@ def test_studio_reads_stack_env(env_file, tmp_path, capsys) -> None:
     assert len(out.split()) == 1
     assert "stack env from" in err
     assert os.environ["HAMMER_PG_HOST"] == "fromfile"
+
+
+def test_a_path_with_shell_syntax_is_sourced_not_run(tmp_path, monkeypatch, env_file) -> None:
+    env_file(SLEDGE_STACK_PROBE="loaded")
+    monkeypatch.chdir(tmp_path)
+    canary = tmp_path / "INJECTED"
+    weird = tmp_path / 'a"$(touch INJECTED)"b'
+    weird.mkdir()
+    target = weird / "env.sh"
+    target.write_text("export SLEDGE_STACK_PROBE='loaded'\n")
+    monkeypatch.setenv("SLEDGE_ENV_FILE", str(target))
+    assert sledgehammer_cli._load_stack_env() == str(target)
+    assert os.environ.get("SLEDGE_STACK_PROBE") == "loaded"
+    assert not canary.exists()

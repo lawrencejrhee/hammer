@@ -222,7 +222,9 @@ def _load_stack_env():
     try:
         # run the file in a shell and diff the environment it produces
         res = subprocess.run(
-            ["bash", "-c", f'set -a; source "{f}" >/dev/null 2>&1; env -0'],
+            # the path goes in as $1, never into the script text, so a
+            # directory name with quotes or $(...) cannot run as code
+            ["bash", "-c", 'set -a; source "$1" >/dev/null 2>&1; env -0', "_", f],
             capture_output=True, timeout=60)
         if res.returncode != 0:
             return None
