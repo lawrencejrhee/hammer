@@ -1,10 +1,19 @@
 import hashlib
 import os
+import sys
 
 import pytest
 
 from hammer.logging import HammerVLSILogging
 from hammer.vlsi import rtl_check
+
+# The CLI driver checks that hammer-shell-test is on PATH.  Running
+# `.venv/bin/python -m pytest` without activating the venv leaves its bin/ off
+# PATH and fails ~70 driver tests with "hammer-shell does not appear to be on
+# the path", so put the interpreter's own bin/ first.
+_BIN = os.path.dirname(sys.executable)
+if _BIN not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _BIN + os.pathsep + os.environ.get("PATH", "")
 
 
 @pytest.fixture(autouse=True)
