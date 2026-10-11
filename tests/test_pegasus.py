@@ -20,7 +20,7 @@ done
 if [ "$FAKE_PEGASUS_MODE" = "ok" ]; then
   sed -n -e 's/.*lvs_report_file "\\([^"]*\\)".*/\\1/p' \\
          -e 's/.*report_summary -[a-z]* "\\([^"]*\\)".*/\\1/p' "$ctl" |
-    while read -r f; do echo "completed" > "$f"; done
+    while read -r f; do echo "completed" > "$f"; echo "#####  Run Result   :   MATCH" > "$f.cls"; done
   exit 0
 fi
 echo "Execution aborted.  Exiting with status 1."

@@ -99,6 +99,35 @@ def _lvs_report_verdict(run_dir: str) -> Optional[str]:
     return None
 
 
+_PEGASUS_RUN_RESULT_RE = re.compile(r"^#*\s*Run Result\s*:\s*(\S.*?)\s*$")
+
+
+def _pegasus_lvs_verdict(run_dir: str, top_module: str) -> Optional[str]:
+    """
+    The Run Result of the Pegasus comparison report <top>.lvs_results.cls as "CORRECT", "INCORRECT"
+    or "NOT COMPARED"; None when no Pegasus extraction report is in run_dir.
+    A comparison report older than the extraction report is left over from an earlier run.
+    """
+    extraction = os.path.join(run_dir, f"{top_module}.lvs_results")
+    comparison = extraction + ".cls"
+    if not os.path.isfile(extraction):
+        return None
+    try:
+        if os.path.getmtime(comparison) < os.path.getmtime(extraction):
+            return "NOT COMPARED"
+        with open(comparison, errors="ignore") as f:
+            for line in f:
+                m = _PEGASUS_RUN_RESULT_RE.match(line)
+                if m:
+                    result = " ".join(m.group(1).upper().split())
+                    if result in ("MATCH", "MATCH WITH WARNINGS"):
+                        return "CORRECT"
+                    return "INCORRECT" if result == "MISMATCH" else "NOT COMPARED"
+    except OSError:
+        pass
+    return "NOT COMPARED"
+
+
 def dump_config_to_json_file(output_path: str, config: dict) -> None:
     """
     Helper function to dump the given config to the given output path while overwriting it if it already exists.
@@ -1051,13 +1080,17 @@ class CLIDriver:
                     # treating exit 0 as success let runs go green, and email
                     # congratulations, for an LVS that verified nothing.
                     verdict = _lvs_report_verdict(driver.lvs_tool.run_dir)
+                    report = "lvs_results.rpt"
+                    if verdict is None:
+                        verdict = _pegasus_lvs_verdict(driver.lvs_tool.run_dir, driver.lvs_tool.top_module)
+                        report = f"{driver.lvs_tool.top_module}.lvs_results.cls"
                     if verdict in ("NOT COMPARED", "INCORRECT"):
                         driver.database.revert_rerun(stage = "lvs", filename = driver.obj_dir + "/master_database.json")
                         driver.log.error(
                             f"LVS report verdict is {verdict}: "
-                            + ("the comparison never ran (see the compiler errors "
-                               "at the top of lvs_results.rpt)" if verdict == "NOT COMPARED"
-                               else "layout and schematic do not match (see lvs_results.rpt)"))
+                            + (f"the comparison never ran (see the errors in {report} and the tool log)"
+                               if verdict == "NOT COMPARED"
+                               else f"layout and schematic do not match (see {report})"))
                         return None
                     if verdict == "CORRECT":
                         driver.log.info("LVS report verdict: CORRECT")
