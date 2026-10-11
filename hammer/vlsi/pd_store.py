@@ -41,6 +41,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -317,6 +318,7 @@ def _pg_settings() -> Dict[str, Any]:
         "port": port,
         "dbname": dbname,
         "user": user,
+        "connect_timeout": _connect_timeout(),
     }
     if password:
         settings["password"] = password
@@ -327,17 +329,32 @@ def _pg_settings() -> Dict[str, Any]:
     if os.path.isfile(pgpass):
         settings["passfile"] = pgpass
         return settings
-    raise RuntimeError(
+    raise DatabaseUnavailable(
         "No Postgres password found. Set HAMMER_PG_PASSWORD in the "
         "environment, ensure airflow.cfg's sql_alchemy_conn "
         "contains a password, or add a ~/.pgpass entry."
     )
 
 
+class DatabaseUnavailable(RuntimeError):
+    """The cache database cannot be reached: no driver, or no password configured."""
+
+
+def _connect_timeout() -> int:
+    """Seconds libpq waits for the server, from HAMMER_PG_CONNECT_TIMEOUT (default 10; 0, or more than libpq can hold, waits forever)."""
+    try:
+        seconds = float(os.environ.get("HAMMER_PG_CONNECT_TIMEOUT") or 10)
+    except ValueError:
+        return 10
+    if math.isnan(seconds):
+        return 10
+    return 0 if seconds <= 0 or seconds > 2**31 - 1 else math.ceil(seconds)
+
+
 def _connect():
     """Open a new psycopg2 connection using env-var config."""
     if psycopg2 is None:
-        raise RuntimeError(
+        raise DatabaseUnavailable(
             "psycopg2 is not installed; the Postgres PD cache is unavailable. "
             "Install psycopg2 (see UV_SETUP.md, or `conda install psycopg2` in a "
             "conda env) to enable caching."
@@ -915,7 +932,7 @@ def lookup_triggering_user(dag_id: str, run_id: str) -> Optional[str]:
             print("[notify] db lookup: no metadata conn resolved "
                   "(env/SLEDGE_METADATA_CONN/file/conf/cfg all empty)")
             return None
-        conn = psycopg2.connect(**settings)
+        conn = psycopg2.connect(**{"connect_timeout": _connect_timeout(), **settings})
         try:
             with conn.cursor() as cur:
                 cur.execute(
@@ -960,8 +977,7 @@ def get_user_workspace(username: Optional[str], workspace_name: str = "default",
     if not workspace_name:
         workspace_name = "default"
 
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         _ensure_schema(conn, quiet=True)
@@ -1024,8 +1040,7 @@ def list_user_workspaces(username: Optional[str] = None) -> List[Tuple[str, str,
     """Return rows from user_workspaces as
     (username, workspace_name, workspace_root, updated_at). Pass ``username`` to
     list only that user's workspaces; omit it to list everyone's."""
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     try:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
@@ -1055,8 +1070,7 @@ def delete_stage_blobs(stage_tag: Optional[str] = None) -> int:
 
     Returns the number of rows deleted.
     """
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
@@ -1083,8 +1097,7 @@ def delete_master_databases(design: Optional[str] = None) -> int:
 
     Returns the number of rows deleted.
     """
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
@@ -1107,8 +1120,7 @@ def delete_artifacts(kind: Optional[str] = None) -> int:
 
     Returns the number of rows deleted.
     """
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
@@ -1129,8 +1141,7 @@ def delete_user_workspace(username: str, workspace_name: Optional[str] = None) -
 
     With ``workspace_name``, removes only that one named workspace; without it,
     removes ALL of the user's workspaces."""
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
@@ -1268,8 +1279,7 @@ def delete_blobs(**filters: Any) -> int:
             "refusing to delete with no filter; pass at least one of "
             "--user/--design/--stage/--before/--after/--sha (or use wipe-blobs)."
         )
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
@@ -1314,8 +1324,7 @@ def reassign_blobs(
     if not set_cols:
         raise ValueError("nothing to set; pass at least one --set-* value.")
     sql = f"UPDATE {FQ_BLOB} SET {', '.join(set_cols)}{where}"
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
@@ -1337,8 +1346,7 @@ def set_user_workspace(username: str, workspace_root: str,
         raise ValueError("workspace_root must be non-empty")
     if not workspace_name:
         workspace_name = "default"
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         _ensure_schema(conn, quiet=True)
@@ -2035,8 +2043,7 @@ def clear_cache_events(*, all_rows: bool = False, **filters: Any) -> int:
         raise ValueError(
             "refusing to clear the whole ledger without a filter; pass a filter "
             "(--dag/--design/--stage/--before/--after/--user) or all_rows=True.")
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         _ensure_schema(conn, quiet=True)
@@ -2063,8 +2070,7 @@ def set_cache_event_project(project: str, *, all_rows: bool = False,
         raise ValueError(
             "refusing to relabel the whole ledger without a filter; pass a "
             "filter (--dag/--design/--stage/--after/--before/--user) or all_rows=True.")
-    settings = _pg_settings()
-    conn = psycopg2.connect(**settings)
+    conn = _connect()
     conn.autocommit = True
     try:
         _ensure_schema(conn, quiet=True)

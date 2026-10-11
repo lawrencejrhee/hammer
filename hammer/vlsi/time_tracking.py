@@ -1199,10 +1199,10 @@ def collect_savings_events(
         return _db(), "postgres ledger"
     if source == "both":
         try:
-            db = _db()
-        except Exception:
-            db = []
-        return db + _jsonl(), "postgres ledger + jsonl files"
+            db, label = _db(), "postgres ledger + jsonl files"
+        except Exception as e:
+            db, label = [], f"jsonl files (DB unavailable: {e})"
+        return db + _jsonl(), label
     # auto
     try:
         db = _db()

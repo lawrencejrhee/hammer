@@ -340,8 +340,9 @@ def _cmd_admin(args: argparse.Namespace) -> int:
               "  Run it while the server is up, or with the secrets loaded, or pass it:\n"
               "  studio admin <uid> --conn postgresql://USER:PW@HOST:PORT/DBNAME")
         return 1
-    import psycopg2
-    conn = psycopg2.connect(**settings)
+    if pd_store.psycopg2 is None:
+        raise pd_store.DatabaseUnavailable("psycopg2 is not installed; studio admin needs it to reach the Airflow metadata DB.")
+    conn = pd_store.psycopg2.connect(**{"connect_timeout": pd_store._connect_timeout(), **settings})
     try:
         with conn.cursor() as cur:
             if args.remove:
@@ -1013,6 +1014,9 @@ def _cmd_time_saved(args: argparse.Namespace) -> int:
         project=args.project, module=args.module, limit=args.limit,
         events_dir=args.events_dir,
     )
+    db_down = "DB unavailable" in source
+    if db_down:
+        print(f"WARNING: reporting from {source}", file=sys.stderr)
     if args.cache_only:
         events = time_tracking.exclude_depcheck_skips(events)
         source = f"{source}, cache-only"
@@ -1024,9 +1028,9 @@ def _cmd_time_saved(args: argparse.Namespace) -> int:
             with open(args.csv, "w") as f:
                 f.write(csv_text)
             print(f"Wrote {args.csv} ({len(csv_text.splitlines()) - 1} data row(s)).")
-        return 0
+        return 1 if db_down and not events else 0
     print(time_tracking.format_savings_report(events, group_by=args.group_by, source=source))
-    return 0
+    return 1 if db_down and not events else 0
 
 
 def _cmd_project_set(args: argparse.Namespace) -> int:
@@ -1204,6 +1208,7 @@ def _cmd_cache_status(args: argparse.Namespace) -> int:
         print(f"Durable ledger   : {n} event row(s) in {pd_store.FQ_CACHE_EVENT}")
     except Exception as e:
         print(f"Durable ledger   : unreachable ({e})")
+        return 1
     return 0
 
 
@@ -1908,7 +1913,19 @@ def main(argv: List[str] | None = None) -> int:
     loaded = _load_stack_env()
     if loaded:
         print(f"[studio] stack env from {loaded}", file=sys.stderr)
-    return args.func(args)
+    db_errors = (pd_store.DatabaseUnavailable,) + (
+        (pd_store.psycopg2.OperationalError,) if pd_store.psycopg2 else ())
+    try:
+        return args.func(args)
+    except db_errors as e:
+        # a server-side error (timeout, deadlock, disk full) carries a SQLSTATE; keep its traceback
+        if getattr(e, "pgcode", None):
+            raise
+        lines = [line.strip() for line in str(e).splitlines() if line.strip()] or [type(e).__name__]
+        print(f"studio: database unavailable: {lines[0]}", file=sys.stderr)
+        for line in lines[1:]:
+            print(f"  {line}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
