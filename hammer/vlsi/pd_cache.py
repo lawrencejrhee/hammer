@@ -350,7 +350,7 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
 
 
 def _rebase_restored_paths(rundir_path: Path, output_filename: str,
-                           info=None, warn=None) -> int:
+                           info=None, stored_name: Optional[str] = None) -> int:
     """Point a restored rundir's json outputs at the dir it was restored into.
 
     A blob stored from one build dir carries that dir's absolute paths in its
@@ -358,46 +358,60 @@ def _rebase_restored_paths(rundir_path: Path, output_filename: str,
     paths back into the original dir (whatever state it is in now), and the
     collateral fingerprint would hash those out-of-dir inputs, so that stage
     could never hit the cache either. Infer the original obj_dir from the
-    paths themselves -- the prefix before this rundir's own name -- and
-    rewrite it to the current obj_dir in every top-level json of the rundir.
-    Returns the number of files changed; on any trouble the rundir is left
-    exactly as restored.
+    paths themselves: the prefix before the rundir's name in the blob
+    (``stored_name``, by default this rundir's own name). Rewrite it to the
+    current obj_dir, and the stored rundir to this one, in every top-level
+    json of the rundir. Returns the number of files changed. When the paths
+    cannot be rewritten, or a rundir restored under a new name is a symlink,
+    holds a symlinked top-level json or has no path under its stored name, it
+    removes the output json (or the symlinked rundir itself) and raises, so
+    the restore counts as a miss.
     """
     import os
     import re
     info = info or (lambda msg: None)
-    warn = warn or (lambda msg: None)
     try:
         new_dir = str(rundir_path.parent)
         name = rundir_path.name
+        stored = stored_name or name
+        if stored != name and (rundir_path.is_symlink()
+                               or any(j.is_symlink() for j in rundir_path.glob("*.json"))):
+            raise ValueError(f"the stored rundir {stored} is a symlink or holds a symlinked json")
         out = rundir_path / output_filename
         if not out.exists():
             return 0
         text = out.read_text()
         prefixes: Dict[str, int] = {}
-        for m in re.finditer(r'"((?:/[^"/]+)+)/' + re.escape(name) + r'/', text):
+        for m in re.finditer(r'"((?:/[^"/]+)+)/' + re.escape(stored) + r'/', text):
             prefixes[m.group(1)] = prefixes.get(m.group(1), 0) + 1
         if not prefixes:
+            if stored != name:
+                raise ValueError(f"{output_filename} has no path under the stored rundir {stored}")
             return 0
         orig = max(prefixes, key=prefixes.get)
-        if orig == new_dir or os.path.realpath(orig) == os.path.realpath(new_dir):
+        same_dir = orig == new_dir or os.path.realpath(orig) == os.path.realpath(new_dir)
+        if same_dir and stored == name:
             return 0
         # only whole-path matches: /a/build/ChipTop must not touch /a/build/ChipTop-iso
-        pat = re.compile(re.escape(orig) + r'(?=/|["\s,\]])')
+        pat = re.compile(re.escape(orig) + r'(/' + re.escape(stored) + r')?(?=/|["\s,\]])')
         changed = 0
         for jf in rundir_path.glob("*.json"):
             s = jf.read_text()
-            t = pat.sub(new_dir, s)
+            t = pat.sub(lambda m: f"{new_dir}/{name}" if m.group(1) else new_dir, s)
             if t != s:
                 jf.write_text(t)
                 changed += 1
         if changed:
-            info(f"PD cache: restored {name} was stored from {orig}; "
-                 f"rewrote {changed} json file(s) to {new_dir}")
+            info(f"PD cache: restored {name} was stored from {orig}/{stored}; "
+                 f"rewrote {changed} json file(s) to {rundir_path}")
         return changed
     except Exception as e:
-        warn(f"PD cache: could not rebase restored paths ({e}); leaving them as restored.")
-        return 0
+        try:
+            # unlink a symlinked rundir itself, never a file through it
+            (rundir_path if rundir_path.is_symlink() else rundir_path / output_filename).unlink()
+        except OSError:
+            pass
+        raise RuntimeError(f"cannot point the restored paths at {rundir_path}: {e}") from e
 
 
 def cache_or_run(
@@ -489,8 +503,8 @@ def cache_or_run(
         _check_restore_allowed(rundir_path)
         try:
             rundir_path.parent.mkdir(parents=True, exist_ok=True)
-            pd_store.untar_to_directory(data, rundir_path.parent, as_name=rundir_path.name)
-            _rebase_restored_paths(rundir_path, output_filename, _info, _warn)
+            stored_name = pd_store.untar_to_directory(data, rundir_path.parent, as_name=rundir_path.name)
+            _rebase_restored_paths(rundir_path, output_filename, _info, stored_name)
             output_path = rundir_path / output_filename
             with output_path.open("r") as f:
                 output = json.load(f)
@@ -719,8 +733,8 @@ def try_restore_from_cache(
     _check_restore_allowed(rundir_path)
     try:
         rundir_path.parent.mkdir(parents=True, exist_ok=True)
-        pd_store.untar_to_directory(data, rundir_path.parent, as_name=rundir_path.name)
-        _rebase_restored_paths(rundir_path, output_filename, _info, _warn)
+        stored_name = pd_store.untar_to_directory(data, rundir_path.parent, as_name=rundir_path.name)
+        _rebase_restored_paths(rundir_path, output_filename, _info, stored_name)
         restore_seconds = time.monotonic() - _restore_t0
         saved = None
         saved_cpu = None

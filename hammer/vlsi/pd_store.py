@@ -2418,14 +2418,15 @@ def _extract_like_tar_filter(tar: tarfile.TarFile, dest: Path) -> None:
         os.chmod(dirpath, member.mode)
 
 
-def untar_to_directory(data: bytes, dest: Path, as_name: Optional[str] = None) -> None:
+def untar_to_directory(data: bytes, dest: Path, as_name: Optional[str] = None) -> Optional[str]:
     """Extract a gzip tar into ``dest``. ``dest`` is created if it doesn't exist.
 
     With ``as_name``, the archive must hold exactly one top-level entry, and it
     lands at ``dest/as_name`` whatever it was called when tarred. Restores pass
     the rundir they were asked for, so a blob named ``syn-rundir`` cannot
     replace a sibling of ``my-syn``, and a checkpoint cannot write anything
-    beside its own ``pre_<step>``.
+    beside its own ``pre_<step>``. It then returns the name the entry was
+    tarred under; without ``as_name`` it returns None.
 
     Blobs come from teammates via the shared cache, so member names must not
     be able to write outside ``dest``: the "tar" filter strips absolute paths
@@ -2448,6 +2449,7 @@ def untar_to_directory(data: bytes, dest: Path, as_name: Optional[str] = None) -
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".untar-", dir=str(dest)))
+    stored_name: Optional[str] = None
     try:
         with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
             if hasattr(tarfile, "tar_filter"):
@@ -2461,7 +2463,8 @@ def untar_to_directory(data: bytes, dest: Path, as_name: Optional[str] = None) -
             if len(entries) != 1:
                 raise ValueError(f"expected one top-level entry to restore as {as_name!r}, "
                                  f"found {sorted(e.name for e in entries)}")
-            if as_name != entries[0].name:
+            stored_name = entries[0].name
+            if as_name != stored_name:
                 renamed = staging / f".as-{os.getpid()}" / as_name
                 renamed.parent.mkdir()
                 os.replace(entries[0], renamed)
@@ -2481,3 +2484,4 @@ def untar_to_directory(data: bytes, dest: Path, as_name: Optional[str] = None) -
             _discard(displaced)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+    return stored_name
