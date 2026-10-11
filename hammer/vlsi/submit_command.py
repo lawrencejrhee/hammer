@@ -358,6 +358,7 @@ class HammerSlurmSubmitCommand(HammerSubmitCommand):
             else:
                 break
         # TODO: check errors
+        proc.communicate()
 
         # Refresh output directory (fixes NFS issue)
         if cwd is not None:
