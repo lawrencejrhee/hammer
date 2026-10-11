@@ -33,7 +33,7 @@ def _fake_slang(monkeypatch, codes):
     def run(cmd, **kwargs):
         calls.append(cmd)
         code = codes[min(len(calls), len(codes)) - 1]
-        if code == 0:
+        if code == 0 and "--ast-json" in cmd:
             out = cmd[cmd.index("--ast-json") + 1]
             with open(out, "w") as f:
                 f.write('{"design": {"members": [{"kind": "Instance", "name": "top"}]}, "definitions": []}')
@@ -49,7 +49,7 @@ def test_a_slang_crash_retries_single_threaded(tmp_path, monkeypatch) -> None:
     rtl.write_text("module top; endmodule\n")
     calls = _fake_slang(monkeypatch, [-10, 0])
     overall, _ = rtl_check.digest_files([str(rtl)], top_module="top")
-    assert len(calls) == 2
+    assert len(calls) == 3 and "-E" in calls[2]
     assert "--threads" not in calls[0]
     assert calls[1][1:3] == ["--threads", "1"]
     assert not overall.startswith("bytes:")

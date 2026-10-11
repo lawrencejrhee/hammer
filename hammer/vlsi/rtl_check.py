@@ -607,6 +607,9 @@ def _digest_real_paths(real_paths: List[str],
 
     payload = {"design": _canon(members, index, set()),
                "definitions": _canon(doc.get("definitions", []), index, set())}
+    pragmas = _pragmas(_run_slang_text(real_paths, include_dirs, defines, "-E", "--comments"))
+    if pragmas:
+        payload["pragmas"] = pragmas
     text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     overall = sha256_hex(text.encode("utf-8"))
 
@@ -620,6 +623,35 @@ def _digest_real_paths(real_paths: List[str],
                       files=",".join(sorted(covered)) or (real_paths[0] if real_paths else ""),
                       tokens=_count(payload))
     return overall, [unit]
+
+
+#  Comments to slang, instructions to Genus: translate_off/on drop code from
+#  synthesis and full_case/parallel_case change how a case statement maps.
+_PRAGMA = re.compile(
+    r"\s*(?:synopsys|synthesis|pragma|cadence|ambit)\s+"
+    r"(translate_(?:off|on)|synthesis_(?:off|on)|synthesis\s+(?:off|on)|full_case|parallel_case|"
+    r"infer_mux|infer_onehot_mux|one_hot|one_cold|a?sync_set_reset(?:_local(?:_all)?)?|"
+    r"keep|preserve|dont_touch|map_to_module|return_port_name|template|enum|state_vector|"
+    r"dc_script_begin|dc_script_end|black_box|infer_multibit|dont_infer_multibit)\b(.*)",
+    re.IGNORECASE | re.DOTALL)
+_TOKEN = re.compile(r'//[^\n]*|/\*.*?(?:\*/|\Z)|\\\S*|"(?:\\.|[^"\\\n])*"?|[^\s/"\\]+|/', re.DOTALL)
+
+
+def _pragmas(text: str) -> List[List[str]]:
+    """Every synthesis pragma comment in slang's preprocessed text, placed by a hash of all the code before it."""
+    found: List[List[str]] = []
+    code = hashlib.sha256()
+    for tok in _TOKEN.finditer(text):
+        s = tok.group()
+        if s.startswith("//") or s.startswith("/*"):
+            body = s[2:-2] if s.startswith("/*") and s.endswith("*/") and len(s) >= 4 else s[2:]
+            m = _PRAGMA.match(body)
+            if m:
+                found.append([" ".join(m.group(1).lower().split()), " ".join(m.group(2).split()),
+                              code.copy().hexdigest()[:16]])
+        else:
+            code.update(s.encode("utf-8"))
+    return found
 
 
 def _warn_uncovered(paths: Sequence[str], covered: Set[str]) -> None:
