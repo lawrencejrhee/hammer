@@ -329,7 +329,8 @@ class HammerSlurmSubmitCommand(HammerSubmitCommand):
         if self.settings.partition is not None:
             args.extend(["--partition", self.settings.partition])
         if self.settings.num_cpus is not None:
-            args.extend(["--ntasks", "%d" % self.settings.num_cpus])
+            # One copy of the tool with num_cpus CPUs; --ntasks alone would launch num_cpus copies.
+            args.extend(["--ntasks", "1", "--cpus-per-task", "%d" % self.settings.num_cpus])
         if self.settings.extra_args is not None:
             args.extend(self.settings.extra_args)
         return args
