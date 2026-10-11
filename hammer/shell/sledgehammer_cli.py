@@ -232,7 +232,8 @@ def _load_stack_env():
         res = subprocess.run(
             # the path goes in as $1, never into the script text, so a
             # directory name with quotes or $(...) cannot run as code
-            ["bash", "-c", 'set -a; source "$1" >/dev/null 2>&1; env -0', "_", f],
+            ["bash", "-c", '_sledgehammer_env_file=$1; set --; set -a; '
+             'source "$_sledgehammer_env_file" >/dev/null 2>&1; env -0', "_", f],
             capture_output=True, timeout=60)
         if res.returncode != 0:
             return None
