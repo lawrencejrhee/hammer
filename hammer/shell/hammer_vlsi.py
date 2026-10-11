@@ -11,6 +11,7 @@ def main():
 '''
 import re
 import os
+import shlex
 import subprocess
 import sys
 import json
@@ -163,17 +164,24 @@ def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=N
     # user_workspaces table, read-only. Runs never create rows -- a missing
     # registration is an error with the fix spelled out, not a silent default.
     ws_name = explicit_ws or "default"
+    is_owner = bool(gen_user) and str(user) == str(gen_user)
     try:
         from hammer.vlsi import pd_store
         workspace_root = pd_store.get_user_workspace(user, ws_name, auto_register=False)
     except Exception as e:
+        if not is_owner:
+            raise WorkspaceNotRegistered(
+                f"could not look up workspace {ws_name!r} for user {user!r}, so the run "
+                f"stops instead of using the DAG owner's OBJ_DIR. {type(e).__name__}: {e}"
+            ) from e
         print(f"WARNING: could not resolve per-user workspace for {user!r}: {e}. "
               f"Falling back to the DAG's baked OBJ_DIR.")
         return None
     if not workspace_root:
+        name_flag = "" if ws_name == "default" else f" --name {shlex.quote(str(ws_name))}"
         raise WorkspaceNotRegistered(
             f"no workspace registered for user {user!r} (workspace {ws_name!r}). "
-            f"Register one first:  studio workspace-set {user} /path/to/their/build"
+            f"Register one first:  studio workspace-set {user} /path/to/their/build{name_flag}"
         )
 
     obj_dir = os.path.join(workspace_root, design)
@@ -188,7 +196,15 @@ def _resolve_workspace_obj_dir(context, design, default_obj_dir=None, gen_user=N
     print(f"[user-workspace] triggering_user={user!r} workspace={ws_name!r} "
           f"dag_id={dag_id!r} run_id={run_id!r} -> OBJ_DIR={obj_dir}")
     if claim:
-        claim_obj_dir(obj_dir, dag_id, run_id, user)
+        try:
+            claim_obj_dir(obj_dir, dag_id, run_id, user)
+        except OSError as e:
+            if is_owner:
+                raise
+            raise WorkspaceNotRegistered(
+                f"cannot claim {obj_dir} for user {user!r}, so the run stops instead of "
+                f"using the DAG owner's OBJ_DIR. {type(e).__name__}: {e}"
+            ) from e
     return obj_dir
 
 
@@ -196,11 +212,12 @@ RUN_LOCK_NAME = ".sledgehammer-run.lock"
 
 
 class WorkspaceNotRegistered(RuntimeError):
-    """Someone other than the DAG's owner triggered it and has no workspace.
+    """The run's workspace is not registered, or a non-owner cannot look it up or claim it.
 
+    The owner gets it too when the trigger names an unregistered workspace.
     Like RunLockConflict, the generated DAGs re-raise it: falling back to the
-    baked OBJ_DIR would run this user's build in the owner's directory, without
-    the run lock.
+    baked OBJ_DIR would run this build in the owner's directory, without the
+    run lock.
     """
 
 
