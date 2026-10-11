@@ -1035,7 +1035,8 @@ airflow db check
 airflow db check-migrations
 
 # Test postgres connection
-./scripts/test_postgres_connection.sh
+sledgehammer db check
+studio cache-status
 
 # Run hammer tests
 pytest tests/ -m "not long" -v
@@ -1322,8 +1323,8 @@ Files marked with ★ were modified from the stock Hammer repository.
 
 For issues specific to SledgeHammer PostgreSQL integration:
 1. Check this documentation
-2. Run `./scripts/test_postgres_connection.sh` for diagnostics
-3. Run `./scripts/verify_postgres.sh` for database health check
+2. Run `sledgehammer db check` to test the connection to the Airflow metadata database
+3. Run `sledgehammer db check-migrations` for the schema status and `studio cache-status` for the PD cache database
 4. If the PostgreSQL server is down, contact:
    - **Email**: anne_young@berkeley.edu
    - **System Admins**: bwrc-sysadmins@lists.eecs.berkeley.edu

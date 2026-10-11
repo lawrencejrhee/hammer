@@ -57,7 +57,8 @@ def _venv_bin(name: str) -> str:
 def _load_secrets() -> None:
     """Decrypt the same GPG secrets the launcher uses into the environment, so
     airflow passthrough commands can reach the metadata DB. No-op if there's no
-    secrets file (airflow then uses whatever is already in the environment).
+    secrets file, apart from one stderr line whenever no metadata DB connection
+    ends up set, naming the airflow.cfg that Airflow then falls back to.
     """
     enc = os.path.expanduser(os.environ.get(
         "SLEDGE_SECRETS_FILE", os.path.join(REPO, ".sledgehammer", "airflow-secrets.env.gpg")))
@@ -65,7 +66,11 @@ def _load_secrets() -> None:
     # prompt) when they're already exported into this environment.
     if os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"):
         return
+    cfg = os.environ.get("AIRFLOW_CONFIG") or os.path.join(
+        os.environ.get("AIRFLOW_HOME", REPO), "airflow.cfg")
     if not os.path.exists(enc):
+        print(f"[sledgehammer] no secrets file at {enc} and AIRFLOW__DATABASE__SQL_ALCHEMY_CONN "
+              f"is unset, so Airflow falls back to sql_alchemy_conn in {cfg}.", file=sys.stderr)
         return
     try:
         if sys.stdin.isatty():
@@ -97,6 +102,9 @@ def _load_secrets() -> None:
         if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
             val = val[1:-1]
         os.environ[key] = val
+    if not os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN"):
+        print(f"[sledgehammer] {enc} does not set AIRFLOW__DATABASE__SQL_ALCHEMY_CONN, "
+              f"so Airflow falls back to sql_alchemy_conn in {cfg}.", file=sys.stderr)
 
 
 # The stage names the generated DAGs accept as trigger-conf booleans.
