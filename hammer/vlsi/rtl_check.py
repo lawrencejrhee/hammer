@@ -114,10 +114,64 @@ def _checked_binary() -> str:
 
 # ── Running slang ───────────────────────────────────────────────────────────
 
+def _source_flags(include_dirs: Sequence[str], defines: Sequence[str]) -> List[str]:
+    """The include and define options every slang run of these inputs shares."""
+    flags: List[str] = []
+    for d in include_dirs:
+        flags += ["-I", d, "--isystem", d]
+    for d in defines:
+        flags += ["-D", d]
+    # Genus and Yosys predefine SYNTHESIS, and only syn and later stages use this fingerprint.
+    if not any(d.split("=", 1)[0] == "SYNTHESIS" for d in defines):
+        flags += ["-D", "SYNTHESIS"]
+    return flags
+
+
+#  --show-parsed-files prints one of these for each input and each `include slang follows.
+_PARSED = re.compile(r"^Parsing (?:design|include) file '(.*)'\.$", re.MULTILINE)
+_PARSE_TRACE = re.compile(r"^(?:Parsing (?:design|include) file|Back to file) '.*'\.$\n?", re.MULTILINE)
+
+
+def _parsed_files(stdout: str) -> List[str]:
+    """The files --show-parsed-files reported, resolved, in first-read order."""
+    return list(dict.fromkeys(os.path.realpath(p) for p in _PARSED.findall(stdout)))
+
+
+def _slang(cmd: List[str], paths: Sequence[str]) -> "subprocess.CompletedProcess[str]":
+    """Run one slang command, again single-threaded if a signal kills it, and raise RtlParseError if it fails."""
+    proc = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
+    if proc.returncode < 0:
+        # slang parses on worker threads, and macOS gives those a small
+        # stack, so a deeply nested expression kills it with SIGBUS before
+        # its own --max-parse-depth check fires.  One thread keeps the work
+        # on the main stack; the AST JSON is the same either way.
+        proc = subprocess.run([cmd[0], "--threads", "1"] + cmd[1:],
+                              capture_output=True, encoding="utf-8", errors="replace")
+    if proc.returncode < 0:
+        raise RtlParseError(paths[0] if paths else "<none>",
+                            f"slang crashed (signal {-proc.returncode}) even "
+                            f"single-threaded. {(proc.stderr or '').strip()}".rstrip())
+    if proc.returncode != 0:
+        # slang still writes a JSON file on error; it describes a design that
+        # did not compile, so it must not be hashed.  Its own diagnostics
+        # already carry file:line, so they are the whole report.
+        report = (proc.stderr or "") + _PARSE_TRACE.sub("", proc.stdout or "")
+        raise RtlParseError(_blamed_file(report, paths), _explain(report))
+    return proc
+
+
+def _run_slang_text(paths: Sequence[str], include_dirs: Sequence[str], defines: Sequence[str],
+                    *mode: str) -> str:
+    """Run slang in a mode that prints to stdout instead of elaborating, such as --parse-only or -E."""
+    return _slang([_checked_binary(), "-q", "--single-unit", "--diag-abs-paths", *mode]
+                  + _source_flags(include_dirs, defines) + list(paths), paths).stdout
+
+
 def _run_slang(paths: Sequence[str],
                include_dirs: Sequence[str],
                defines: Sequence[str],
-               top_module: Optional[str]) -> Dict[str, Any]:
+               top_module: Optional[str],
+               parsed: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     Compile the inputs and return slang's elaborated AST as parsed JSON.
 
@@ -129,6 +183,8 @@ def _run_slang(paths: Sequence[str],
     ``--ast-json-detailed-types`` expands types structurally instead of printing
     a typedef by its alias name, which is what lets widening a shared typedef
     reach the modules that use it.
+
+    ``parsed``, when given, receives every file slang read, `include files too.
     """
     for path in paths:
         if not os.path.isfile(path):
@@ -147,37 +203,16 @@ def _run_slang(paths: Sequence[str],
         cmd = [binary, "-q", "--single-unit", "--ignore-unknown-modules",
                "--diag-abs-paths", "--timescale", "1ns/1ps",
                "--ast-json-detailed-types", "--ast-json-source-info",
-               "--ast-json", out_path]
-        for d in include_dirs:
-            cmd += ["-I", d, "--isystem", d]
-        for d in defines:
-            cmd += ["-D", d]
-        # Genus and Yosys predefine SYNTHESIS, and only syn and later stages use this fingerprint.
-        if not any(d.split("=", 1)[0] == "SYNTHESIS" for d in defines):
-            cmd += ["-D", "SYNTHESIS"]
+               "--ast-json", out_path] + _source_flags(include_dirs, defines)
         if top_module:
             cmd += ["--top", top_module]
+        if parsed is not None:
+            cmd.append("--show-parsed-files")
         cmd += list(paths)
 
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-        if proc.returncode < 0:
-            # slang parses on worker threads, and macOS gives those a small
-            # stack, so a deeply nested expression kills it with SIGBUS before
-            # its own --max-parse-depth check fires.  One thread keeps the work
-            # on the main stack; the AST JSON is the same either way.
-            proc = subprocess.run([binary, "--threads", "1"] + cmd[1:],
-                                  capture_output=True, text=True)
-        if proc.returncode < 0:
-            raise RtlParseError(paths[0] if paths else "<none>",
-                                f"slang crashed (signal {-proc.returncode}) even "
-                                f"single-threaded. {(proc.stderr or '').strip()}".rstrip())
-        if proc.returncode != 0:
-            # slang still writes a JSON file on error; it describes a design that
-            # did not compile, so it must not be hashed.  Its own diagnostics
-            # already carry file:line, so they are the whole report.
-            report = (proc.stderr or "") + (proc.stdout or "")
-            blamed = _blamed_file(report, paths)
-            raise RtlParseError(blamed, _explain(report))
+        proc = _slang(cmd, paths)
+        if parsed is not None:
+            parsed.extend(_parsed_files(proc.stdout))
         with open(out_path, "r", encoding="utf-8") as f:
             return json.load(f)
     finally:
@@ -404,7 +439,104 @@ def digest_units(paths: Sequence[str],
     if not real_paths:
         return sha256_hex(b""), []
 
-    return _with_deep_stack(_digest_real_paths, real_paths, include_dirs, defines, top_module)
+    memo = _memo_dir()
+    snap = None
+    if memo is not None:
+        snap = _snapshot(_read_files(real_paths, include_dirs, defines))
+        memo = _memo_path(memo, snap, include_dirs, defines, top_module) if snap else None
+        hit = _memo_load(memo, real_paths)
+        if hit is not None:
+            return hit
+    notes: Dict[str, Any] = {}
+    result = _with_deep_stack(_digest_real_paths, real_paths, include_dirs, defines, top_module, notes)
+    if memo is not None and [s[0] for s in snap] == notes["files"] and _snapshot(notes["files"]) == snap:
+        _memo_store(memo, result, notes["covered"])
+    return result
+
+
+# ── Memo ────────────────────────────────────────────────────────────────────
+#  Elaborating a large design costs tens of seconds, so its fingerprint is kept
+#  under the content of every file a quick parse-only slang pass reads, which
+#  covers each header exactly as slang resolves it.
+
+_MEMO_ENV = "HAMMER_RTL_FP_CACHE"
+
+
+def _memo_dir() -> Optional[str]:
+    """$HAMMER_RTL_FP_CACHE, else ~/.cache/sledgehammer/rtl-fingerprint; None when the variable turns it off."""
+    env = os.environ.get(_MEMO_ENV)
+    if env is not None and env.strip().lower() in ("", "0", "false", "no", "off"):
+        return None
+    if env:
+        return env
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "sledgehammer", "rtl-fingerprint")
+
+
+def _file_sha(path: str) -> Optional[str]:
+    try:
+        with open(path, "rb") as f:
+            return sha256_hex(f.read())
+    except OSError:
+        return None
+
+
+def _read_files(real_paths: Sequence[str], include_dirs: Sequence[str], defines: Sequence[str]) -> List[str]:
+    """Every file slang reads for these inputs, from a parse-only pass; empty when that pass fails."""
+    try:
+        return _parsed_files(_run_slang_text(real_paths, include_dirs, defines, "--parse-only", "--show-parsed-files"))
+    except RtlParseError:
+        return []
+
+
+def _snapshot(files: Sequence[str]) -> Optional[List[List[Any]]]:
+    """Each file's content hash with the stat fields every write changes; None if there are none or one cannot be read."""
+    snap: List[List[Any]] = []
+    for path in files:
+        try:
+            st = os.stat(path)
+            with open(path, "rb") as f:
+                sha = sha256_hex(f.read())
+        except OSError:
+            return None
+        snap.append([path, sha, st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino])
+    return snap or None
+
+
+def _memo_path(directory: str, snap: Sequence[Sequence[Any]], include_dirs: Sequence[str],
+               defines: Sequence[str], top_module: Optional[str]) -> str:
+    """The memo file for these file contents and options under this slang and this rtl_check."""
+    key = {"files": [list(s[:2]) for s in snap], "include_dirs": [os.path.realpath(d) for d in include_dirs],
+           "defines": list(defines), "top": top_module, "slang": SLANG_VERSION,
+           "rtl_check": _file_sha(os.path.abspath(__file__))}
+    return os.path.join(directory, sha256_hex(json.dumps(key, sort_keys=True).encode("utf-8")) + ".json")
+
+
+def _memo_load(path: Optional[str], real_paths: Sequence[str]) -> Optional[Tuple[str, List[DesignUnit]]]:
+    if path is None:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            memo = json.load(f)
+        units = [DesignUnit(**u) for u in memo["units"]]
+        _warn_uncovered(real_paths, set(memo["covered"]))
+        return memo["overall"], units
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _memo_store(path: str, result: Tuple[str, List[DesignUnit]], covered: Sequence[str]) -> None:
+    """Best effort, since a memo that cannot be written only costs the next run its speedup."""
+    overall, units = result
+    memo = {"overall": overall, "covered": list(covered), "units": [u.__dict__ for u in units]}
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".memo.", dir=os.path.dirname(path))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(memo, f)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 _DEEP_RECURSION_LIMIT = 200_000
@@ -440,8 +572,10 @@ def _with_deep_stack(fn: Any, *args: Any) -> Any:
 def _digest_real_paths(real_paths: List[str],
                        include_dirs: Sequence[str],
                        defines: Sequence[str],
-                       top_module: Optional[str]) -> Tuple[str, List[DesignUnit]]:
-    doc = _run_slang(real_paths, include_dirs, defines, top_module)
+                       top_module: Optional[str],
+                       notes: Optional[Dict[str, Any]] = None) -> Tuple[str, List[DesignUnit]]:
+    parsed: List[str] = []
+    doc = _run_slang(real_paths, include_dirs, defines, top_module, parsed)
 
     #  Without this, a document missing both keys hashes to a fixed constant via
     #  the .get() defaults below, so every such design would share a fingerprint.
@@ -479,6 +613,8 @@ def _digest_real_paths(real_paths: List[str],
     covered: Set[str] = set()
     _contributing_files(doc.get("design", {}), covered)
     _warn_uncovered(real_paths, covered)
+    if notes is not None:
+        notes["files"], notes["covered"] = parsed, sorted(covered)
 
     unit = DesignUnit(key="design", sha256=overall,
                       files=",".join(sorted(covered)) or (real_paths[0] if real_paths else ""),

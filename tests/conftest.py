@@ -28,6 +28,11 @@ def _no_code_fingerprint_memo(monkeypatch):
     monkeypatch.setenv("HAMMER_CODE_FP_CACHE", "off")
 
 
+@pytest.fixture(autouse=True)
+def _no_rtl_fingerprint_memo(monkeypatch):
+    monkeypatch.setenv("HAMMER_RTL_FP_CACHE", "off")
+
+
 _PLACEHOLDER_RTL_TEST_MODULES = {"test_cli_driver", "test_flowgraph", "test_force_rerun", "test_rerun_messages"}
 
 
