@@ -45,6 +45,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tarfile
 import tempfile
 from pathlib import Path
@@ -2357,6 +2358,27 @@ def _tar_filter_and_hard_links(member: tarfile.TarInfo, path: str) -> tarfile.Ta
     return filtered
 
 
+def _trust_checked_member(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo:
+    return member
+
+
+def _not_a_plain_path(root: str, name: str) -> bool:
+    """True if ``name`` has a ``..`` part or an existing part of it under ``root`` is a symlink."""
+    parts = name.split("/")
+    if ".." in parts:
+        return True
+    path = root
+    for part in parts:
+        path = os.path.join(path, part)
+        # os.lstat, not os.path.islink, so an error such as ENAMETOOLONG aborts the restore.
+        try:
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                return True
+        except FileNotFoundError:
+            return False
+    return False
+
+
 def _extract_like_tar_filter(tar: tarfile.TarFile, dest: Path) -> None:
     """Extract ``tar`` into ``dest`` with the checks of tarfile's "tar" filter.
 
@@ -2364,15 +2386,34 @@ def _extract_like_tar_filter(tar: tarfile.TarFile, dest: Path) -> None:
     through a symlink extracted earlier in the same archive is caught too.
     """
     root = os.path.realpath(dest)
+    if hasattr(type(tar), "extraction_filter"):
+        tar.extraction_filter = _trust_checked_member
+    directories = []
     for member in tar.getmembers():
         if os.path.isabs(member.name) or not _inside(root, os.path.join(root, member.name)):
             raise tarfile.ExtractError(f"refusing to extract {member.name!r} outside {dest}")
         if _hard_link_escapes(member, root):
             raise tarfile.ExtractError(f"refusing hard link {member.name!r} -> {member.linkname!r}")
+        if _not_a_plain_path(root, member.name):
+            raise tarfile.ExtractError(f"refusing {member.name!r}: it has a '..' part or goes through a symlink")
+        if member.islnk() and _not_a_plain_path(root, member.linkname):
+            raise tarfile.ExtractError(f"refusing hard link {member.name!r} -> {member.linkname!r}")
         if member.ischr() or member.isblk() or member.isfifo():
             raise tarfile.ExtractError(f"refusing special file {member.name!r}")
         member.mode &= 0o755
-        tar.extract(member, path=root)
+        tar.extract(member, path=root, set_attrs=not member.isdir())
+        if member.isdir():
+            directories.append(member)
+    for member in sorted(directories, key=lambda m: m.name, reverse=True):
+        dirpath = os.path.join(root, member.name)
+        try:
+            lst = os.lstat(dirpath)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISDIR(lst.st_mode):
+            continue
+        os.utime(dirpath, (member.mtime, member.mtime))
+        os.chmod(dirpath, member.mode)
 
 
 def untar_to_directory(data: bytes, dest: Path, as_name: Optional[str] = None) -> None:
@@ -2410,9 +2451,7 @@ def untar_to_directory(data: bytes, dest: Path, as_name: Optional[str] = None) -
             if hasattr(tarfile, "tar_filter"):
                 tar.extractall(path=str(staging), filter=_tar_filter_and_hard_links)
             else:
-                # Python without the extraction-filter backport (macOS's system
-                # 3.9.6, anything before 3.9.17). A bare extractall would honor
-                # "../" member names, so apply the same rules by hand.
+                # This tarfile has no extraction filters, so members are checked and extracted by hand.
                 _extract_like_tar_filter(tar, staging)
 
         entries = sorted(staging.iterdir())
