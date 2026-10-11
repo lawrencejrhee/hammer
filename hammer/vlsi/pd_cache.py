@@ -174,9 +174,10 @@ def _run_with_checkpoint_stream(driver, stage_tag, rundir, run_fn):
     exists. Streaming during the run means a SIGKILL, OOM, node crash, or a
     demolished rundir loses at most one push interval of progress instead of
     all of it. Every push is the same trusted path the failure push uses
-    (log-confirmed, key-matched, ceiling-clamped), deduped by step so a quiet
-    tool costs one file scan per interval. Any trouble in the streamer is
-    swallowed: it must never affect the run itself.
+    (log-confirmed, key-matched, ceiling-clamped). Each step is uploaded at
+    most once, a push that fails for a reason that may pass is retried the
+    next interval, and a quiet tool costs one file scan per interval. Any
+    trouble in the streamer is swallowed: it must never affect the run itself.
     """
     log_name = _STREAM_LOGS.get(stage_tag)
     if log_name is None:
@@ -199,7 +200,7 @@ def _run_with_checkpoint_stream(driver, stage_tag, rundir, run_fn):
     module = _stage_module(driver, stage_tag)
 
     def _loop():
-        last = None
+        last = done = None
         while not stop.wait(interval):
             try:
                 confirmed = substep_resume.confirmed_checkpoints(rundir, log_name)
@@ -215,15 +216,11 @@ def _run_with_checkpoint_stream(driver, stage_tag, rundir, run_fn):
                                 stamp.write_text(f"{cpu_now:.3f}\n")
                             except OSError:
                                 pass
-                # Remember the newest checkpoint seen, not the step pushed: the
-                # push clamps to the resume ceiling and returns None when it
-                # refuses (oversized, key moved), and either way comparing
-                # against it re-tarred and re-uploaded the same multi-GB
-                # checkpoint every interval for the rest of the run.
                 if confirmed and confirmed[-1] != last:
-                    last = confirmed[-1]
-                    substep_resume.push_checkpoint_db(
-                        driver, stage_tag, rundir, log_name, module=module)
+                    handled = substep_resume.push_checkpoint_db(
+                        driver, stage_tag, rundir, log_name, module=module, skip=done)
+                    if handled is not None:
+                        last, done = confirmed[-1], handled
             except Exception:
                 pass
 

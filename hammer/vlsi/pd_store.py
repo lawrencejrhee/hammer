@@ -2123,6 +2123,8 @@ def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
     Returns the stored size in bytes.
     """
     path = Path(path)
+    # connect first, so an unreachable database fails before the tar
+    conn = _connect()
     if path.is_dir():
         data = tar_directory(path, arcname=path.name)
         is_dir = True
@@ -2143,7 +2145,7 @@ def store_checkpoint(stage_key: str, stage: str, step: str, path: Path,
     cols = ("triggering_user", "dag_id", "dag_run_id", "workspace",
             "design", "module", "project")
     vals = [provenance.get(c) for c in cols]
-    with _connect() as conn:
+    with conn:
         _ensure_schema(conn, quiet=True)
         with conn.cursor() as cur:
             cur.execute(

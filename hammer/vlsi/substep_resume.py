@@ -425,18 +425,23 @@ def _cpu_saved(rundir: str, first_step: str, resume_step: str):
 
 def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
                        log_name: str = "genus.log",
-                       module: Optional[str] = None) -> Optional[str]:
+                       module: Optional[str] = None,
+                       skip: Optional[str] = None) -> Optional[str]:
     """After a failed or paused run, upload the newest trusted checkpoint so
-    another machine or a fresh checkout can resume this stage. Never raises;
-    returns the pushed step name or None."""
+    another machine or a fresh checkout can resume this stage. Never raises.
+    Returns the step it is done with: pushed, equal to skip (not uploaded
+    again), or refused for good (the stage key moved, or the store failed for
+    a reason other than I/O or the database connection, such as an oversized
+    checkpoint or a missing privilege). Returns None when it tried nothing or
+    hit an I/O or connection failure, so a later call may succeed."""
     try:
         if not is_enabled(driver) or not _db_enabled(driver):
             return None
         key = _stage_key(driver, stage_tag)
         if key is None:
             return None
-        marker = read_marker(rundir)
-        if marker is None or marker.get("stage_key") != key:
+        state, marker = _load_marker(rundir)
+        if state == "unreadable":
             return None
         confirmed = confirmed_checkpoints(rundir, log_name)
         # a checkpoint past the resume ceiling can never seed a resume;
@@ -449,6 +454,8 @@ def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
         if not confirmed:
             return None
         step = confirmed[-1]
+        if step == skip or marker is None or marker.get("stage_key") != key:
+            return step
         path = os.path.join(rundir, "pre_" + step)
         # same floor measurement the local resume uses (checkpoint mtime span),
         # carried with the row so a cross-machine resume credits the skipped
@@ -472,7 +479,9 @@ def push_checkpoint_db(driver: Any, stage_tag: str, rundir: str,
             # say why the push was skipped (an oversized checkpoint is the
             # common case) instead of vanishing into the outer catch-all
             _log_info(driver, f"Checkpoint push skipped: {exc}")
-            return None
+            db = pd_store.psycopg2
+            retry = (OSError,) if db is None else (OSError, db.OperationalError, db.InterfaceError)
+            return None if isinstance(exc, retry) else step
         _log_info(driver, f"Pushed checkpoint pre_{step} ({size / 1e6:.1f} MB "
                           "compressed) to the database for cross-machine resume.")
         return step

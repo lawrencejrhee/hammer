@@ -1,19 +1,11 @@
-"""The in-run checkpoint streamer pushes each new checkpoint once.
-
-Comparing against the step push_checkpoint_db returned (clamped to the resume
-ceiling, or None when the push is refused) re-uploaded the same checkpoint
-every interval for the rest of the run.
-"""
+"""The in-run checkpoint streamer pushes each new checkpoint once."""
 import threading
 import time
-
-import pytest
 
 from hammer.vlsi import pd_cache, substep_resume
 
 
-@pytest.mark.parametrize("push_result", ["write_regs", None], ids=["clamped", "refused"])
-def test_one_push_per_new_checkpoint(monkeypatch, tmp_path, push_result):
+def test_one_push_per_new_checkpoint(monkeypatch, tmp_path):
     monkeypatch.setenv("HAMMER_CHECKPOINT_STREAM_SECS", "0.01")
     monkeypatch.setattr(substep_resume, "is_enabled", lambda d: True)
     monkeypatch.setattr(substep_resume, "_db_enabled", lambda d: True)
@@ -25,7 +17,7 @@ def test_one_push_per_new_checkpoint(monkeypatch, tmp_path, push_result):
 
     def push(*a, **k):
         pushes.append(time.monotonic())
-        return push_result
+        return "write_regs"
 
     monkeypatch.setattr(substep_resume, "push_checkpoint_db", push)
     done = threading.Event()
