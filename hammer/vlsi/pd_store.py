@@ -50,13 +50,14 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import stat
 import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
-from urllib.parse import unquote
+from urllib.parse import parse_qsl, unquote
 
 try:
     import psycopg2
@@ -178,7 +179,7 @@ def _find_airflow_cfg() -> Optional[Path]:
 
 # The password runs to the first @ that leaves a valid host, so a raw / ? # or @ in it still parses.
 _CONN_URI = re.compile(r"(?P<scheme>[\w+]+)://(?:(?P<user>[^:/]*)(?::(?P<password>.*?))?@)??"
-                       r"(?P<host>\[[^\]]*\]|[^/:?@\[\]]*)(?::(?P<port>\d*))?(?:/(?P<dbname>[^?@]*))?(?:\?.*)?\Z",
+                       r"(?P<host>\[[^\]]*\]|[^/:?@\[\]]*)(?::(?P<port>\d*))?(?:/(?P<dbname>[^?@]*))?(?:\?(?P<query>.*))?\Z",
                        re.S)
 
 
@@ -202,6 +203,14 @@ def _parse_conn_uri(conn_str: str) -> Dict[str, Any]:
         out["password"] = unquote(url.group("password"))
     if url.group("dbname"):
         out["dbname"] = url.group("dbname")
+    # Query parameters win, as when SQLAlchemy hands them to psycopg2; a socket directory keeps its case.
+    for key, value in parse_qsl(url.group("query") or ""):
+        if key == "host" and value:
+            out["host"] = value if value.startswith(("/", "@")) else value.lower()
+        elif key == "port" and value.isdigit() and int(value):
+            out["port"] = int(value)
+        elif key in ("user", "password", "dbname") and value:
+            out[key] = value
     return out
 
 
@@ -275,9 +284,21 @@ def airflow_metadata_conn_settings() -> Dict[str, Any]:
     return _parse_airflow_cfg_conn()
 
 
+def libpq_default_port(environ: Optional[Mapping[str, str]] = None) -> int:
+    """The port libpq uses when a conn names none: PGPORT, else 5432."""
+    value = str((os.environ if environ is None else environ).get("PGPORT") or "")
+    return int(value) if value.isdigit() and int(value) else 5432
+
+
+def _with_default_port(settings: Dict[str, Any], environ: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:
+    if settings.get("host") and not settings.get("port"):
+        settings["port"] = libpq_default_port(environ)
+    return settings
+
+
 def export_conn_defaults() -> None:
     """Copy host, port and user from the Airflow conn into unset HAMMER_PG_* vars, which DAG tasks inherit though they lose the conn itself."""
-    settings = _parse_conn_uri(os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", ""))
+    settings = _with_default_port(_parse_conn_uri(os.environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "")))
     for field, var in (("host", "HAMMER_PG_HOST"), ("port", "HAMMER_PG_PORT"), ("user", "HAMMER_PG_USER")):
         if field in settings:
             os.environ.setdefault(var, str(settings[field]))
@@ -319,11 +340,12 @@ def postgres_target(path: Optional[str] = None) -> Dict[str, str]:
 
 def pg_fields(environ: Optional[Mapping[str, str]] = None,
               target: Optional[Dict[str, str]] = None) -> Dict[str, Tuple[Any, str]]:
-    """Each cache connection field as (value, source), the source being env, conn, target, cfg or default."""
+    """Each cache connection field as (value, source), the source being env, conn, libpq, target, cfg or default."""
     environ = os.environ if environ is None else environ
     if target is None:
         target = postgres_target(postgres_target_file(secrets_file(environ)))
-    fallback, source = _parse_conn_uri(environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", "")), "conn"
+    conn = _parse_conn_uri(environ.get("AIRFLOW__DATABASE__SQL_ALCHEMY_CONN", ""))
+    fallback, source = _with_default_port(dict(conn), environ), "conn"
     if not fallback:
         fallback = {field: target[var] for field, var in _PG_VARS
                     if field in ("host", "port", "user") and target.get(var)}
@@ -342,7 +364,7 @@ def pg_fields(environ: Optional[Mapping[str, str]] = None,
         elif field == "dbname" and target.get(var):
             fields[field] = (target[var], "target")
         elif field != "dbname" and fallback.get(field):
-            fields[field] = (fallback[field], source)
+            fields[field] = (fallback[field], "libpq" if source == "conn" and field not in conn else source)
         elif field in defaults:
             fields[field] = (defaults[field], "default")
     fields["port"] = (int(fields["port"][0]), fields["port"][1])
@@ -467,11 +489,39 @@ def _pg_settings(environ: Optional[Mapping[str, str]] = None,
     if password is not None:
         settings["password"] = password
         return settings
+    env_file = stack_env_file()
+    load = (f"Run \"source {env_file}\" if it sets HAMMER_PG_PASSWORD" if env_file
+            else "Run \"source venv.sh\" to load HAMMER_PG_PASSWORD from the encrypted secrets")
     raise DatabaseUnavailable(
-        "No Postgres password found." + (f" {why}." if why else "") + " Run \"source venv.sh\" to load "
-        "HAMMER_PG_PASSWORD from the encrypted secrets, export HAMMER_PG_PASSWORD, or add a ~/.pgpass line "
-        "for this server; \"sledgehammer postgres show\" says where each setting comes from."
+        "No Postgres password found." + (f" {why}." if why else "") + f" {load}, export HAMMER_PG_PASSWORD, or "
+        "add a ~/.pgpass line for this server; \"sledgehammer postgres show\" says where each setting comes from."
     )
+
+
+_STACK_SETS_LOGIN = re.compile(r"^[ \t]*(?:export[ \t]+)?(?:AIRFLOW__DATABASE__SQL_ALCHEMY_CONN|HAMMER_PG_PASSWORD)=",
+                               re.M)
+
+
+def stack_env_file() -> Optional[str]:
+    """The stack env file to name in a no-password hint, shell-quoted with your home as ~: when it sets the conn or the password, or there are no encrypted secrets for venv.sh to load."""
+    try:
+        from hammer.shell.sledgehammer_cli import _find_stack_env
+        found = _find_stack_env()
+    except Exception:
+        return None
+    if not found:
+        return None
+    if any(os.path.isfile(path) for path in (secrets_file(), SECRETS_FILE)):
+        try:
+            with open(found, encoding="utf-8", errors="replace") as f:
+                if not _STACK_SETS_LOGIN.search(f.read(1 << 20)):
+                    return None
+        except OSError:
+            return None
+    home = os.path.expanduser("~").rstrip(os.sep)
+    if home and found.startswith(home + os.sep):
+        return "~/" + shlex.quote(found[len(home) + 1:])
+    return shlex.quote(found)
 
 
 class DatabaseUnavailable(RuntimeError):

@@ -49,7 +49,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -188,7 +187,6 @@ def _cmd_stage_pull(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        shutil.rmtree(rundir)
     rundir.parent.mkdir(parents=True, exist_ok=True)
     pd_store.untar_to_directory(data, rundir.parent, as_name=rundir.name)
     print(f"sha256={sha} stage={stored_stage} extracted to {rundir}")
@@ -385,6 +383,7 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
             design_dir = cwd / "e2e" / "configs-design" / design
         else:
             design_dir = Path("e2e/configs-design") / design
+    design_dir = design_dir.resolve()
 
     if not design_dir.is_dir():
         print(f"Design directory not found: {design_dir}", file=sys.stderr)
@@ -402,14 +401,20 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
             print("Pass --skip-augment to bypass.", file=sys.stderr)
             return 2
 
-    repo_root = Path(args.repo_root) if args.repo_root else Path.cwd()
+    repo_root = (Path(args.repo_root) if args.repo_root else Path.cwd()).resolve()
     e2e = repo_root / "e2e"
-    obj_dir = Path(args.obj_dir) if args.obj_dir else (
+    driver_path = Path(args.driver).resolve() if args.driver else e2e / "example-driver"
+    if not driver_path.is_file():
+        print(f"Driver script not found: {driver_path}. Pass the design's driver with --driver.",
+              file=sys.stderr)
+        return 2
+    obj_dir = (Path(args.obj_dir) if args.obj_dir else (
         e2e / f"build-{args.pdk}-{args.tools}" / design
-    )
+    )).resolve()
     obj_dir.mkdir(parents=True, exist_ok=True)
 
-    dags_folder = Path(args.dags_folder) if args.dags_folder else (repo_root / "dags")
+    from hammer.shell.dags_folder import resolve_dags_folder
+    dags_folder = Path(args.dags_folder or resolve_dags_folder()[0])
 
     env_conf = e2e / "configs-env" / f"{args.env}-env.yml"
     pdk_conf = e2e / "configs-pdk" / f"{args.pdk}.yml"
@@ -450,21 +455,29 @@ def _cmd_make_dag(args: argparse.Namespace) -> int:
     )
     extra_dict = {
         "vlsi.core.build_system": "airflow",
-        "vlsi.core.airflow_dags_folder": str(dags_folder),
+        "vlsi.core.airflow_dags_folder": str(dags_folder.resolve()),
     }
     if args.dag_id:
         extra_dict["vlsi.core.airflow_dag_id"] = args.dag_id
     import json
     extra = hcfg.load_config_from_string(json.dumps(extra_dict), is_yaml=False)
-    driver = HammerDriver(opts, extra)
 
     from hammer.vlsi.hammer_build_systems import build_airflow_dag
     errs: List[str] = []
-    dep_graph = build_airflow_dag(
-        driver, errs.append,
-        proj_confs_by_tools=proj_confs_by_tools,
-        default_tools=args.tools,
-    )
+    # The DAG and hammer.d bake in argv[0] and the cwd, so present them as make does: the driver, run from e2e/.
+    saved_argv0, saved_cwd = sys.argv[0], os.getcwd()
+    sys.argv[0] = str(driver_path)
+    os.chdir(e2e)
+    try:
+        driver = HammerDriver(opts, extra)
+        dep_graph = build_airflow_dag(
+            driver, errs.append,
+            proj_confs_by_tools=proj_confs_by_tools,
+            default_tools=args.tools,
+        )
+    finally:
+        sys.argv[0] = saved_argv0
+        os.chdir(saved_cwd)
     for e in errs:
         print(f"WARNING: {e}", file=sys.stderr)
 
@@ -1455,7 +1468,9 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="Where to write the generated DAG. "
                             "Defaults to build-<pdk>-<tools>/<design> under e2e/.")
     p_dag.add_argument("--dags-folder", default=None,
-                       help="Where to symlink the DAG. Defaults to <repo>/dags.")
+                       help="Where to symlink the DAG. Defaults to the folder `sledgehammer run` "
+                            "looks in: $HAMMER_DAGS_FOLDER, $AIRFLOW__CORE__DAGS_FOLDER, airflow.cfg, "
+                            "then $AIRFLOW_HOME/dags.")
     p_dag.add_argument("--pdk", default="sky130")
     p_dag.add_argument("--tools", default="cm")
     p_dag.add_argument("--env", default="bwrc")
@@ -1463,6 +1478,9 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="DAG ID to use in Airflow. Defaults to "
                             "Hammer_<design>. Pick whatever name you want "
                             "shown in the Airflow UI.")
+    p_dag.add_argument("--driver", default=None,
+                       help="The design's driver script, which every DAG task runs. "
+                            "Defaults to <repo>/e2e/example-driver, as make uses.")
     p_dag.add_argument("--skip-augment", action="store_true",
                        help="Don't run the augment step first. By default "
                             "make-dag runs augment to keep blackbox stubs "

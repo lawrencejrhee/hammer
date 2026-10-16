@@ -21,7 +21,11 @@ Flow commands -- hammer's flags, the DAG as plumbing, no GUI required:
       Trigger the selected stages on an already-registered DAG and stream
       task states until the run finishes. Exit code follows the run, so it
       drops into a Makefile exactly where hammer-vlsi did. Generate the DAG
-      the usual way first: cd <vlsi dir> && make buildfile.
+      first: cd <vlsi dir> && sledgehammer buildfile.
+  cd vlsi && sledgehammer buildfile [VAR=val ...] [--target NAME]
+      Generate and register the DAG: runs `make buildfile` (`make build`
+      where that is the only rule) with this venv's python first on PATH,
+      so no venv needs activating. Extra arguments go to make.
   sledgehammer run drc lvs --obj_dir build/Top
   sledgehammer run syn --obj_dir build/Top --no-wait
       Trigger and return immediately (prints the run id).
@@ -47,9 +51,11 @@ Set SLEDGE_DRYRUN=1 to print what it would run instead of running it.
 """
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
+from typing import NoReturn
 
 # hammer/shell/sledgehammer_cli.py -> repo root is three levels up.
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -61,6 +67,87 @@ HELP_WORDS = {"-h", "--help", "help"}
 
 def _venv_bin(name: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(sys.executable)), name)
+
+
+DELEGATED_ENV = "SLEDGE_DELEGATED"
+
+
+def _owned_by_me(path: str) -> bool:
+    """Owned by the invoking user and not writable by others, so nobody else can plant code there."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return st.st_uid == os.getuid() and not st.st_mode & stat.S_IWOTH
+
+
+def _is_checkout(path: str) -> bool:
+    """A SledgeHammer checkout of ours with the full stack set up: the launcher, plus sledgehammer and airflow in its .venv."""
+    bindir = os.path.join(path, ".venv", "bin")
+    exe = os.path.join(bindir, "sledgehammer")
+    return (os.path.isfile(os.path.join(path, "scripts", "airflow-standalone-ldap.py"))
+            and all(os.path.isfile(p) and os.access(p, os.X_OK) for p in (exe, os.path.join(bindir, "airflow")))
+            and all(_owned_by_me(p) for p in (path, bindir, exe)))
+
+
+def _checkout_for_cwd() -> str:
+    """The checkout the cwd is in (itself, a workspace's hammer/, or Chipyard's vlsi/hammer), else REPO.
+
+    The hammer/ and vlsi/hammer/ children only count below $HOME (or below / outside it),
+    so a checkout sitting directly in ~ does not capture every directory under it.
+    """
+    try:
+        level = os.path.realpath(os.getcwd())
+    except OSError:
+        return REPO
+    home = os.path.realpath(os.path.expanduser("~"))
+    floor = home if (level + os.sep).startswith(home + os.sep) else os.sep
+    while True:
+        cands = [level]
+        if level != floor and (level + os.sep).startswith(floor.rstrip(os.sep) + os.sep):
+            cands += [os.path.join(level, "hammer"), os.path.join(level, "vlsi", "hammer")]
+        for cand in cands:
+            if _is_checkout(cand):
+                return cand
+        parent = os.path.dirname(level)
+        if parent == level:
+            return REPO
+        level = parent
+
+
+def _delegate_to_checkout_venv() -> None:
+    """Re-exec into the chosen checkout's venv when this copy runs on another python (a conda env, another checkout)."""
+    if os.environ.pop(DELEGATED_ENV, None):
+        return
+    venv = os.path.join(_checkout_for_cwd(), ".venv")
+    exe = os.path.join(venv, "bin", "sledgehammer")
+    if not (os.path.isfile(exe) and os.access(exe, os.X_OK)):
+        return
+    if os.path.realpath(sys.prefix) == os.path.realpath(venv):
+        return
+    os.environ[DELEGATED_ENV] = "1"
+    try:
+        os.execv(exe, [exe] + sys.argv[1:])
+    except OSError as e:
+        os.environ.pop(DELEGATED_ENV, None)
+        print(f"[sledgehammer] could not hand off to {exe} ({e}); running this copy instead.", file=sys.stderr)
+
+
+def _no_airflow_exit() -> NoReturn:
+    sys.exit(f"[sledgehammer] there is no airflow next to this copy's python ({sys.executable}),\n"
+             f"  which belongs to {REPO}. Another sledgehammer on PATH may be shadowing the one\n"
+             f"  setup installed; check with: type -a sledgehammer")
+
+
+def _note_foreign_airflow_home() -> None:
+    """Say so when an exported AIRFLOW_HOME is a different checkout, whose DAGs this run would use."""
+    home = os.environ.get("AIRFLOW_HOME")
+    if home and os.path.isfile(os.path.join(home, "scripts", "airflow-standalone-ldap.py")) \
+            and os.path.realpath(home) != os.path.realpath(REPO):
+        print(f"[sledgehammer] note: AIRFLOW_HOME is {home}, a different checkout than this one ({REPO}),\n"
+              f"  so its airflow.cfg and DAG folder are used. To use this checkout's, unset AIRFLOW_HOME\n"
+              f"  where it is set (your shell or your stack env file).",
+              file=sys.stderr)
 
 
 def _load_secrets() -> None:
@@ -147,8 +234,11 @@ def _airflow_env():
 
 
 def _airflow(*a, capture=True):
-    r = subprocess.run([_venv_bin("airflow"), *a],
-                       capture_output=capture, text=True, env=_airflow_env())
+    try:
+        r = subprocess.run([_venv_bin("airflow"), *a],
+                           capture_output=capture, text=True, env=_airflow_env())
+    except FileNotFoundError:
+        _no_airflow_exit()
     return r.returncode, (r.stdout or ""), (r.stderr or "")
 
 
@@ -264,24 +354,9 @@ def _load_stack_env():
 
 
 def _dags_folder():
-    """Where registered DAGs live, and how we knew.
-
-    Priority: HAMMER_DAGS_FOLDER, then Airflow's own configured dags_folder
-    (authoritative -- it is what the scheduler actually reads), then
-    $AIRFLOW_HOME/dags. Asking Airflow mirrors how --obj_dir asks the
-    Makefile: consult the tool that owns the answer rather than guessing.
-    """
-    env = os.environ.get("HAMMER_DAGS_FOLDER")
-    if env:
-        return env, "$HAMMER_DAGS_FOLDER"
-    try:
-        rc, out, _ = _airflow("config", "get-value", "core", "dags_folder")
-        got = (out or "").strip().splitlines()
-        if rc == 0 and got and got[-1].strip():
-            return got[-1].strip(), "airflow config"
-    except Exception:
-        pass
-    return os.path.join(os.environ.get("AIRFLOW_HOME", REPO), "dags"), "$AIRFLOW_HOME/dags"
+    """Where registered DAGs live, and how we knew: the same resolver the build links with."""
+    from hammer.shell.dags_folder import resolve_dags_folder
+    return resolve_dags_folder()
 
 
 def _dag_obj_dir(dag_file, key="OBJ_DIR"):
@@ -359,8 +434,8 @@ def _no_dag_exit(design, dag_file, dags_src):
         f"[sledgehammer] no DAG registered for {design}.\n"
         f"  looked for: {dag_file}\n"
         f"  (dags folder from {dags_src})\n"
-        f"  Generate it first, the same way you always have:\n"
-        f"      cd <vlsi dir> && make buildfile")
+        f"  Generate it first:\n"
+        f"      cd <vlsi dir> && sledgehammer buildfile")
 
 
 def _cmd_run(args) -> int:
@@ -437,7 +512,7 @@ def _cmd_run(args) -> int:
             sys.exit("[sledgehammer] could not work out obj_dir. Pass "
                      "--obj_dir, or -t <top> for a DAG that is already "
                      "registered, or run from the vlsi directory.\n"
-                     "  No DAG yet? Generate it first: cd <vlsi dir> && make buildfile")
+                     "  No DAG yet? Generate it first: cd <vlsi dir> && sledgehammer buildfile")
         obj_dir = os.path.abspath(obj_dir)
     if not a.obj_dir:
         print(f"[sledgehammer] obj_dir from {src}: {obj_dir}")
@@ -453,11 +528,11 @@ def _cmd_run(args) -> int:
         sys.exit(
             f"[sledgehammer] {dag_id} is registered for {baked}, not {obj_dir}.\n"
             f"  Both builds are named {design}, and only the one generated last is registered.\n"
-            f"  Regenerate the DAG from {obj_dir} (make buildfile) to switch to it.")
+            f"  Regenerate the DAG from {obj_dir} (sledgehammer buildfile) to switch to it.")
 
     if "pcb" in actions and not _dag_has_pcb(dag_file):
         sys.exit(f"[sledgehammer] {dag_file} predates the pcb stage, so asking it for pcb would run "
-                 f"nothing. Regenerate it (make buildfile), or run make pcb.")
+                 f"nothing. Regenerate it first (sledgehammer buildfile).")
 
     _airflow("dags", "unpause", dag_id)
     conf = {s: True for s in actions}
@@ -469,7 +544,7 @@ def _cmd_run(args) -> int:
         conf["forceall"] = True
     if a.force and not a.forceall and not _dag_supports_forceall(dag_file):
         print(f"[sledgehammer] {dag_file} predates per-stage --force, so it still forces "
-              f"every stage this run executes; regenerate it (make buildfile) to force "
+              f"every stage this run executes; regenerate it (sledgehammer buildfile) to force "
               f"only {' '.join(actions)}.")
     if a.local:
         conf["local"] = True
@@ -517,6 +592,75 @@ def _cmd_run(args) -> int:
         return 0
 
 
+def _cmd_buildfile(args) -> int:
+    """Generate and register the DAG from the vlsi directory, as `make buildfile` does."""
+    import getpass
+    import re
+    target, rest = None, []
+    it = iter(args)
+    for x in it:
+        if x == "--target":
+            target = next(it, None)
+        elif x.startswith("--target="):
+            target = x.split("=", 1)[1]
+        else:
+            rest.append(x)
+    if not os.path.isfile("Makefile"):
+        sys.exit("[sledgehammer] no Makefile here; run buildfile from the vlsi directory.")
+    if not target:
+        with open("Makefile", errors="replace") as f:
+            text = f.read()
+
+        def has(name):
+            return re.search(rf"^{name}\s*::?(?![:=])", text, re.M)
+
+        target = "build" if has("build") and not has("buildfile") else "buildfile"
+    cmd = ["make", target, *rest]
+    env = _airflow_env()
+    # not realpath: the venv python is a symlink, and resolving it loses the venv
+    bindir = os.path.dirname(sys.executable)
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    env["VIRTUAL_ENV"] = os.path.dirname(bindir)
+    if os.environ.get("SLEDGE_DRYRUN"):
+        print(f"[dryrun] buildfile  PATH={bindir}:...  ->  {' '.join(cmd)}")
+        return 0
+    dags_folder, _ = _dags_folder()
+    user = getpass.getuser()
+
+    def cwd_dags():
+        """{design: (obj_dir, stamp)} for this directory's DAGs; the stamp changes when a build relinks one."""
+        out = {}
+        for design, obj_dir in _dags_for_cwd(dags_folder, user):
+            link = os.path.join(dags_folder, f"sledgehammer_{design}_{user}.py")
+            try:
+                ls, st = os.lstat(link), os.stat(link)
+                out[design] = (obj_dir, (ls.st_ino, ls.st_mtime_ns, st.st_mtime_ns))
+            except OSError:
+                pass
+        return out
+
+    before = cwd_dags()
+    rc = subprocess.run(cmd, env=env).returncode
+    if rc != 0:
+        return rc
+    after = cwd_dags()
+    built = sorted(d for d, (_, stamp) in after.items() if before.get(d, (None, None))[1] != stamp)
+    if not built and after:
+        print("[sledgehammer] make generated no DAG; registered for this directory:")
+        for design, (obj_dir, _) in sorted(after.items()):
+            print(f"  sledgehammer_{design}_{user} (obj_dir {obj_dir})")
+        return 0
+    if not built:
+        print(f"[sledgehammer] make generated no DAG for this directory in {dags_folder}.\n"
+              f"  Check that vlsi.core.build_system is sledgehammer (not make), and that\n"
+              f"  vlsi.core.airflow_dags_folder, if set, is the folder Airflow reads.")
+        return 0
+    for design in built:
+        print(f"[sledgehammer] registered sledgehammer_{design}_{user} (obj_dir {after[design][0]})")
+    print("[sledgehammer] next: sledgehammer syn" + ("" if len(after) == 1 else f" -t {built[0]}"))
+    return 0
+
+
 def _cmd_status(args, list_only=False) -> int:
     import argparse
     import getpass
@@ -531,9 +675,9 @@ def _cmd_status(args, list_only=False) -> int:
     else:
         _, out, _ = _airflow("dags", "list", "-o", "plain")
         # match the _<user> suffix, not a substring: user "u" must not see
-        # sledgehammer_Top_uma
-        dag_ids = [l.split()[0] for l in out.splitlines()
-                   if l.startswith("sledgehammer_") and l.split()[0].endswith(f"_{user}")]
+        # sledgehammer_Top_uma. Airflow can list one DAG many times, so keep each once.
+        dag_ids = list(dict.fromkeys(l.split()[0] for l in out.splitlines()
+                                     if l.startswith("sledgehammer_") and l.split()[0].endswith(f"_{user}")))
     for dag_id in dag_ids:
         _, out, _ = _airflow("dags", "list-runs", dag_id, "-o", "plain")
         rows = [l.split() for l in out.splitlines()[1:] if l.split()]
@@ -555,6 +699,7 @@ def _cmd_status(args, list_only=False) -> int:
 
 
 def main() -> int:
+    _delegate_to_checkout_venv()
     args = sys.argv[1:]
     sub = args[0] if args else ""
 
@@ -568,11 +713,19 @@ def main() -> int:
         loaded = _load_stack_env()
         if loaded:
             print(f"[sledgehammer] stack env from {loaded}")
+        _note_foreign_airflow_home()
         os.environ.setdefault("AIRFLOW_HOME", REPO)
         _load_secrets()
         if sub == "run":
             return _cmd_run(args[1:])
         return _cmd_status(args[1:], list_only=(sub == "runs"))
+
+    if sub in ("buildfile", "build"):
+        loaded = _load_stack_env()
+        if loaded:
+            print(f"[sledgehammer] stack env from {loaded}")
+        os.environ.setdefault("AIRFLOW_HOME", REPO)
+        return _cmd_buildfile(args[1:])
 
     # Legacy make-target spelling: `sledgehammer par-RocketTile` is the same
     # request as `make par-RocketTile` was, and runs through the DAG.
@@ -583,6 +736,7 @@ def main() -> int:
             loaded = _load_stack_env()
             if loaded:
                 print(f"[sledgehammer] stack env from {loaded}")
+            _note_foreign_airflow_home()
             os.environ.setdefault("AIRFLOW_HOME", REPO)
             _load_secrets()
             fwd = [stage]
@@ -602,6 +756,7 @@ def main() -> int:
 
     if sub in HELP_WORDS:
         sys.stdout.write(__doc__)
+        print(f"\nthis copy: {REPO} (python {sys.executable})")
         return 0
 
     if sub in LAUNCH_WORDS:
@@ -629,7 +784,10 @@ def main() -> int:
               f"(secrets loaded)  ->  {' '.join(cmd)}")
         return 0
     _load_secrets()
-    os.execve(cmd[0], cmd, _airflow_env())
+    try:
+        os.execve(cmd[0], cmd, _airflow_env())
+    except FileNotFoundError:
+        _no_airflow_exit()
 
 
 if __name__ == "__main__":

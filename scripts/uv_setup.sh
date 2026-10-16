@@ -22,6 +22,9 @@ cd "$REPO"
 _path_before_cleanup="${PATH:-}"
 
 _lab="${SLEDGE_LAB:-}"
+# The caller's PATH and conda, kept before the cleanup below so the link step can spot other sledgehammer copies.
+_caller_path="${PATH:-}"
+_caller_conda_exe="${CONDA_EXE:-}"
 
 # Sanitize the build environment. psycopg2 compiles from source
 # here; whatever OpenSSL / libpq is on the linker path gets baked into the
@@ -130,7 +133,8 @@ else
         echo "         Install it yourself and point \$SLANG_BIN at it, e.g."
         echo "           conda install conda-forge::slang-verilog"
         echo "         or build from https://github.com/MikePopoloski/slang."
-        echo "         RTL fingerprinting will fail until then; nothing else is affected."
+        echo "         Until then the RTL fingerprint falls back to a byte hash of the RTL"
+        echo "         files and warns: comment and whitespace edits count as RTL changes."
     else
         mkdir -p "$REPO/tools/slang"
         curl -fsSL -o "$REPO/tools/slang/$_slang_asset" \
@@ -175,30 +179,6 @@ ls "$LIBNSL_LOCAL/usr/lib64/libnsl.so.1"
 step "persist PATH in ~/.bashrc"
 grep -q 'pg_local/usr/bin' "$HOME/.bashrc" 2>/dev/null || \
     printf '\nexport PATH="$HOME/.local/bin:$HOME/pg_local/usr/bin:$PATH"\n' >> "$HOME/.bashrc"
-
-step "remove the old 'sledgehammer' shell function from ~/.bashrc"
-# It shadowed the real command; only the block this script used to write is removed.
-if grep -q '^sledgehammer() {$' "$HOME/.bashrc" 2>/dev/null; then
-    _rc_tmp="$(mktemp)"
-    awk '
-        /^sledgehammer\(\) \{$/ { blk = $0; inblk = 1; next }
-        inblk { blk = blk "\n" $0
-                if ($0 == "}") { if (blk !~ /airflow-standalone-ldap\.py/) print blk; inblk = 0 }
-                next }
-        { print }
-        END { if (inblk) print blk }
-    ' "$HOME/.bashrc" > "$_rc_tmp"
-    if cmp -s "$_rc_tmp" "$HOME/.bashrc"; then
-        echo "  a different sledgehammer() is defined there; left alone, but it shadows the real command"
-    else
-        cp "$HOME/.bashrc" "$HOME/.bashrc.sledgehammer.bak"
-        cat "$_rc_tmp" > "$HOME/.bashrc"
-        echo "  removed (backup: ~/.bashrc.sledgehammer.bak); open a new shell or run: unset -f sledgehammer"
-    fi
-    rm -f "$_rc_tmp"
-else
-    echo "  none found"
-fi
 fi   # end of the default-profile-only prerequisites
 
 step "virtual environment + dependencies"
@@ -271,9 +251,38 @@ python3 -c "import asyncpg" || { echo "ERROR: asyncpg is missing; Airflow 3 need
 step "put 'sledgehammer' on PATH (~/.local/bin)"
 # A link to this one command, so the venv's python and pip do not shadow the system's.
 mkdir -p "$HOME/.local/bin"
+_link="$HOME/.local/bin/sledgehammer"
+_old_link="$(readlink "$_link" 2>/dev/null || true)"
+if [ -n "$_old_link" ] && [ "$(readlink -f "$_link")" != "$(readlink -f "$REPO/.venv/bin/sledgehammer")" ]; then
+    if [ -e "$_link" ]; then
+        echo "  was -> $_old_link"
+    else
+        echo "  was -> $_old_link (no longer exists)"
+    fi
+elif [ -z "$_old_link" ] && [ -e "$_link" ]; then
+    echo "  replacing the file at $_link (a pip --user install?) with the link"
+fi
 ln -sfn "$REPO/.venv/bin/sledgehammer" "$HOME/.local/bin/sledgehammer"
 "$HOME/.local/bin/sledgehammer" --help >/dev/null
+# Any other sledgehammer on the caller's PATH or in its conda (a Chipyard env's, say) can run instead of this one.
+_self="$(readlink -f "$REPO/.venv/bin/sledgehammer")"
+_seen=""
+IFS=: read -ra _dirs <<< "$_caller_path${_caller_conda_exe:+:$(dirname "$_caller_conda_exe")}"
+for _d in "${_dirs[@]}"; do
+    [ -n "$_d" ] && [ -f "$_d/sledgehammer" ] && [ -x "$_d/sledgehammer" ] || continue
+    _r="$(readlink -f "$_d/sledgehammer")"
+    case " $_seen " in *" $_r "*) continue ;; esac
+    _seen="$_seen $_r"
+    [ "$_r" = "$_self" ] && continue
+    echo "  WARNING: $_d/sledgehammer is another copy; it runs instead of this one wherever $_d comes"
+    echo "           first on PATH (check with: type -a sledgehammer). An older copy may run without"
+    echo "           handing off to its checkout's venv; if it is stale, uninstall it from that environment."
+done
 echo "  $HOME/.local/bin/sledgehammer -> $REPO/.venv/bin/sledgehammer"
+
+step "remove the old 'sledgehammer' shell function from ~/.bashrc"
+# It shadowed the real command; only the block this script used to write is removed, and only now that the link works.
+bash "$REPO/scripts/bashrc_drop_old_sledgehammer.sh" "$HOME/.bashrc"
 fi   # end of the default-profile-only Airflow / Postgres block
 
 step "hammer plugins (editable, any that sit next to this checkout)"
@@ -300,10 +309,9 @@ fi
 
 if [ -n "$_lab" ]; then
 step "verify hammer-vlsi runs"
-# Judged by its OUTPUT, not its exit status: hammer-vlsi looks up
-# hammer-shell-test by name, and when the venv's scripts are not on PATH it
-# prints one line to stderr and exits 0 having done nothing. So the exit code
-# proves nothing; the usage block does.
+# Judged by its OUTPUT: hammer-vlsi looks up hammer-shell-test by name, and when
+# the venv's scripts are not on PATH it prints one line to stderr and exits 1
+# before any usage, so the usage block is the proof that it ran.
 # Judge the WHOLE output, not the first line. stderr is unbuffered and stdout is
 # block-buffered on a pipe, so a stray warning could otherwise become "line 1"
 # and fail a working install. grep for the usage line anywhere in the output.
@@ -369,7 +377,7 @@ elif [ ! -t 0 ]; then
 else
     read -rp "  set up Postgres secrets now? [Y/n]: " DO_SECRETS
     if [ "${DO_SECRETS,,}" = "n" ]; then
-        echo "  skipped -- Airflow won't start until these exist."
+        echo "  skipped. Airflow won't start until these exist."
         echo "  create them later: ./scripts/sledge-secrets-create.sh"
     else
         "$REPO/scripts/sledge-secrets-create.sh"
@@ -387,19 +395,25 @@ fi
 step "done"
 if [ -n "$_lab" ]; then
 cat <<EOF
-Hammer is installed in $REPO/.venv and its scripts are on PATH for new shells.
+Hammer is installed in $REPO/.venv and its scripts are on PATH for new bash
+shells, through ~/.bashrc. zsh, csh, or a login shell that skips ~/.bashrc,
+needs the same PATH entry in its own startup file.
 For this shell:
     export PATH="\$PATH:$REPO/.venv/bin"
 Check it works with:
     hammer-vlsi -h
-If that prints nothing at all, PATH is wrong: hammer-vlsi exits 0 without doing
-anything when its scripts are off PATH. Silence is failure, not success.
+If it prints "hammer-shell does not appear to be on the path" instead of its
+usage, PATH is wrong: open a new shell or run the export above.
 EOF
 else
 cat <<EOF
 Setup complete. Open a new shell, then start the stack from any directory with:
     sledgehammer
-(first launch runs the DB migrations automatically.) Run flows with
-'sledgehammer syn', 'sledgehammer par', ..., inside or outside Chipyard.
+(first launch runs the DB migrations automatically.) Register a design's DAG
+once with 'sledgehammer buildfile' from its vlsi directory, then run flows there
+with 'sledgehammer syn', 'sledgehammer par', ..., or from anywhere with
+'sledgehammer syn -t <design>'.
+PATH was added to ~/.bashrc only. If your shell does not read it (zsh, csh, or
+a login shell that skips ~/.bashrc), add $HOME/.local/bin to PATH yourself.
 EOF
 fi
