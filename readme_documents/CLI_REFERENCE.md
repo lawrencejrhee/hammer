@@ -128,9 +128,10 @@ sledgehammer run syn --obj_dir build/ChipTop --no-wait
 ```
 
 Stages: `sim_rtl power_rtl syn sim_syn timing_syn formal_syn power_syn par
-sim_par timing_par formal_par power_par drc lvs pcb` (dashes accepted). `pcb`
+sim_par timing_par formal_par power_par drc lvs eco pcb` (dashes accepted). `pcb`
 writes the board deliverables (bump footprint, pin map, schematic symbol) from
 the configs alone, so it runs once for the whole design, alongside the first stages.
+`eco` patches the routed netlist to match a corrected one; see [ECO.md](ECO.md).
 
 | Flag | Meaning |
 |---|---|

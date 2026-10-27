@@ -48,6 +48,7 @@ class StageGraph():
         self.timing_par = StageNode("timing_par", "timing", prev = [self.par])
         self.drc = StageNode("drc", "drc", prev = [self.par])
         self.lvs = StageNode("lvs", "lvs", prev = [self.par])
+        self.eco = StageNode("eco", "formal", prev = [self.par])
 
         self.sim_rtl.next = [self.power_rtl]
         self.power_rtl.next = []
@@ -58,17 +59,18 @@ class StageGraph():
         self.timing_syn.next = []
         self.formal_syn.next = []
         
-        self.par.next = [self.power_par, self.sim_par, self.formal_par, self.timing_par, self.drc, self.lvs]
+        self.par.next = [self.power_par, self.sim_par, self.formal_par, self.timing_par, self.drc, self.lvs, self.eco]
         self.sim_par.next = [self.power_par]
         self.power_par.next = []
         self.formal_par.next = []
         self.timing_par.next = []
         self.drc.next = []
         self.lvs.next = []
+        self.eco.next = []
 
         self.stageList = [self.sim_rtl, self.power_rtl, self.syn, self.sim_syn, self.power_syn,
                      self.timing_syn, self.formal_syn, self.par, self.sim_par, self.power_par,
-                     self.formal_par, self.timing_par, self.drc, self.lvs]
+                     self.formal_par, self.timing_par, self.drc, self.lvs, self.eco]
                      
         self.stageTagTuple = ("synthesis", "sim", "par", "drc", "lvs", "power", "pcb", "formal", "timing")
 

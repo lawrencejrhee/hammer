@@ -1187,6 +1187,34 @@ class HammerDriver:
             # KeyError means that the given dictionary is missing output keys.
             return None
 
+    @staticmethod
+    def par_output_to_eco_input(output_dict: dict) -> Optional[dict]:
+        """
+        Generate the appropriate inputs for running a functional ECO from the
+        outputs of par run. The post-par netlist is the design to patch; the
+        reference is formal.inputs.eco_reference_files, the netlist
+        synthesized from the corrected RTL.
+        Does not merge the results with any project dictionaries.
+        :param output_dict: Dict containing par.outputs.* and formal.inputs.eco_reference_files
+        :return: formal.inputs.* settings generated from output_dict,
+                 or None if output_dict was invalid
+        """
+        try:
+            reference_files = deeplist(output_dict["formal.inputs.eco_reference_files"])
+            if len(reference_files) == 0:
+                return None
+            result = {
+                "formal.inputs.check": "eco",
+                "formal.inputs.input_files": deeplist([output_dict["par.outputs.output_sim_netlist"]]),
+                "formal.inputs.reference_files": reference_files,
+                "formal.inputs.top_module": output_dict["par.inputs.top_module"],
+                "vlsi.builtins.is_complete": False
+            }  # type: Dict[str, Any]
+            return result
+        except KeyError:
+            # KeyError means that the given dictionary is missing output keys.
+            return None
+
     def run_par(self, hook_actions: Optional[List[HammerToolHookAction]] = None, force_override: bool = False) -> Tuple[
         bool, dict]:
         """

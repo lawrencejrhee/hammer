@@ -375,6 +375,8 @@ class CLIDriver:
             "syn-to-formal": self.synthesis_to_formal_action,
             "par_to_formal": self.par_to_formal_action,
             "par-to-formal": self.par_to_formal_action,
+            "par_to_eco": self.par_to_eco_action,
+            "par-to-eco": self.par_to_eco_action,
             "timing": self.timing_action,
             "synthesis_to_timing": self.synthesis_to_timing_action,
             "synthesis-to-timing": self.synthesis_to_timing_action,
@@ -1384,6 +1386,16 @@ class CLIDriver:
             return None
         else:
             return self.get_full_config(driver, formal_input_only)
+
+    def par_to_eco_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
+        """Create a full config to run the output."""
+        eco_input_only = HammerDriver.par_output_to_eco_input(driver.project_config)
+        if eco_input_only is None:
+            driver.log.error("Input config does not appear to contain valid par outputs and "
+                             "formal.inputs.eco_reference_files (the netlist synthesized from the corrected RTL)")
+            return None
+        else:
+            return self.get_full_config(driver, eco_input_only)
 
     def synthesis_to_timing_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
         """Create a full config to run the output."""

@@ -28,9 +28,11 @@ SIM_CONF            ?= $(if $(findstring -rtl,$(MAKECMDGOALS)), configs-design/$
 POWER_CONF          ?= $(if $(findstring power-rtl,$(MAKECMDGOALS)), configs-design/$(design)/power-rtl-$(pdk).yml, \
                        $(if $(findstring power-syn,$(MAKECMDGOALS)), configs-design/$(design)/power-syn-$(pdk).yml, \
                        $(if $(findstring power-par,$(MAKECMDGOALS)), configs-design/$(design)/power-par-$(pdk).yml, )))
+# names the corrected netlist the eco stage patches toward; without it par-to-eco says what is missing
+ECO_CONF            ?= $(if $(findstring eco,$(MAKECMDGOALS)), $(wildcard configs-design/$(design)/eco.yml), )
 SRAM_CONF           ?= $(OBJ_DIR)/sram_generator-output.json
 
-PROJ_YMLS           ?= $(PDK_CONF) $(TOOLS_CONF) $(DESIGN_CONF) $(DESIGN_PDK_CONF) $(SIM_CONF) $(POWER_CONF) $(extra)
+PROJ_YMLS           ?= $(PDK_CONF) $(TOOLS_CONF) $(DESIGN_CONF) $(DESIGN_PDK_CONF) $(SIM_CONF) $(POWER_CONF) $(ECO_CONF) $(extra)
 HAMMER_EXTRA_ARGS   ?= $(foreach conf, $(PROJ_YMLS), -p $(conf)) -p $(SRAM_CONF) $(args)
 
 

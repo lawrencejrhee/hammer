@@ -625,6 +625,10 @@ formal.inputs:
   # type: List[str]
   reference_files: list[str]
 
+  # For the eco stage: the netlist synthesized from the corrected RTL
+  # type: List[str]
+  eco_reference_files: list[str]
+
   # Top RTL module for running verification on
   # type: str
   top_module: Optional[str]

@@ -2,12 +2,14 @@
 #
 #  See LICENSE for licence details.
 
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any, Optional
 
 import os
+import re
 import errno
 
 from hammer.vlsi import HammerFormalTool, HammerToolStep
+from hammer.vlsi.constraints import MMMCCornerType
 from hammer.logging import HammerVLSILogging
 import hammer.tech as hammer_tech
 from hammer.common.cadence import CadenceTool
@@ -149,6 +151,11 @@ class Conformal(HammerFormalTool, CadenceTool):
 
     @property
     def steps(self) -> List[HammerToolStep]:
+        if self.check == "eco":
+            return self.make_steps_from_methods([
+                self.setup_eco_designs,
+                self.patch_eco_designs
+            ])
         if self.check != "lec":
             self.logger.error("Check type {self.check} not yet supported!")
         steps = [
@@ -219,6 +226,160 @@ class Conformal(HammerFormalTool, CadenceTool):
         append("report_statistics")
 
         return True
+
+    # Functional ECO (formal.inputs.check: eco): the flat ECO flow of the EECS 144
+    # ECO project's conformal_eco.do, in Tcl mode. The implemented design
+    # (input_files, the post-par netlist) is read as golden so that apply_patch
+    # patches it in place; the reference (reference_files, synthesized from the
+    # corrected RTL) is read as revised.
+
+    def setup_eco_designs(self) -> bool:
+        """ Read the Liberty and both netlists, and set up a flat ECO """
+        append = self.append
+
+        # Exit on dofile error
+        append("set_dofile_abort exit")
+
+        # Multithreading (max 16 allowed by tool)
+        max_threads = min(self.get_setting("vlsi.core.max_threads"), 16)
+        append(f"set_parallel_option -threads 1,{max_threads}")
+
+        append("set_log_file eco.log -replace")
+        append("usage -auto -elapse")
+
+        # The patch is built from library cells, so read their Liberty
+        liberty_files = self.eco_liberty_files()
+        if len(liberty_files) == 0:
+            self.logger.error("No Liberty files to build the ECO patch from")
+            return False
+        append(f"read_library {' '.join(liberty_files)} -liberty -both -replace")
+
+        valid_exts = [".v", ".v.gz"]
+        if not self.check_input_files(valid_exts) or not self.check_reference_files(valid_exts):
+            return False
+        implemented_files = list(map(lambda name: os.path.join(os.getcwd(), name), self.input_files))
+        append(f"read_design {' '.join(implemented_files)} -golden -replace")
+        reference_files = list(map(lambda name: os.path.join(os.getcwd(), name), self.reference_files))
+        append(f"read_design {' '.join(reference_files)} -revised -replace")
+        append(f"set_root_module {self.top_module} -both")
+
+        # Flat ECO on a hierarchical design
+        append("set_eco_option -flat")
+        append("uniquify -all -nolibrary -revised")
+        append("flatten -matchhierarchy -nolibrary -revised")
+
+        return True
+
+    def patch_eco_designs(self) -> bool:
+        """
+        Compare, patch what differs, compare again, and write the results. One
+        step, as in the original dofile: each checkpoint between steps costs
+        about as much time as the whole ECO on a small design.
+        """
+        append = self.append
+
+        # Compare before patching; the designs are expected to differ
+        append("set_system_mode lec")
+        append("analyze_hier_compare -dofile hier.eco.do -replace -eco_aware -verbose")
+        append("add_compared_points -all")
+        append("compare")
+        append("redirect 01_pre_eco_verification.rpt {report_verification}")
+        append("redirect 02_pre_eco_nonequivalent.rpt {report_compare_data -class nonequivalent}")
+
+        # Find the modules that differ and write the patch for them
+        append("compare_eco_hierarchy")
+        append("redirect 03_eco_check.rpt {report_eco_check -verbose}")
+        append("redirect 04_eco_hierarchy_noneq.rpt {report_eco_hierarchy -noneq -verbose}")
+        append(f"analyze_eco {self.eco_patch_path} -hierarchical -ecopin_dofile ecopin.do -replace")
+
+        # Add the ECO pins and patch the implemented design
+        append("set_system_mode setup")
+        append("dofile ecopin.do")
+        append("apply_patch -auto -golden -keephierarchy")
+
+        # Compare again; the patched design must now match the reference
+        append("set_system_mode lec")
+        append("add_compared_points -all")
+        append("compare")
+        append("redirect 05_post_eco_verification.rpt {report_verification}")
+        append("redirect 06_post_eco_compare_data.rpt {report_compare_data}")
+
+        # The patched netlist, and the patch as Innovus netlist edits
+        append(f"report_eco_changes -innovus -file {self.eco_innovus_script_path} -replace")
+        append(f"write_eco_design -newfile {self.eco_netlist_path} -replace -report 07_ECOprelogics.rpt")
+
+        self.ran_patch_eco_designs = True
+        return True
+
+    def eco_liberty_files(self) -> List[str]:
+        """
+        Liberty of the setup corner (every corner when there are no MMMC corners):
+        one corner so the patch maps onto a single characterization of each cell,
+        and every library at it, pads and macros included, since Conformal stops
+        on a netlist cell it has no model for.
+        """
+        setup = [c for c in self.get_mmmc_corners() if c.type is MMMCCornerType.Setup]
+        return self.get_timing_libs(setup[0] if setup else None).split()
+
+    def eco_compare_result(self, report: str) -> Optional[str]:
+        """ The Compare Results line of a report_verification report in the rundir, e.g. PASS or FAIL:NONEQ """
+        try:
+            with open(os.path.join(self.run_dir, report)) as f:
+                found = re.search(r"Compare Results:\s*(\S+)", f.read())
+        except OSError:
+            return None
+        return found.group(1) if found else None
+
+    def fill_outputs(self) -> bool:
+        if self.check != "eco":
+            return super().fill_outputs()
+        if not self.ran_patch_eco_designs:
+            self.logger.info("Did not run patch_eco_designs")
+            return super().fill_outputs()
+        # lec's exit status flags the non-equivalent points of the first
+        # compare, which every ECO has, so the post-ECO report decides.
+        report = os.path.join(self.run_dir, "05_post_eco_verification.rpt")
+        result = self.eco_compare_result("05_post_eco_verification.rpt")
+        if result != "PASS":
+            self.logger.error(f"The patched design does not match the reference: the post-ECO compare "
+                              f"reported {result or 'no result'}. See {report}.")
+            return False
+        if self.eco_compare_result("01_pre_eco_verification.rpt") == "PASS":
+            self.logger.warning("The implemented design already matched the reference, so the ECO patch is empty.")
+        for path in (self.eco_patch_path, self.eco_netlist_path, self.eco_innovus_script_path):
+            if not os.path.isfile(path):
+                self.logger.error(f"ECO output {path} not found")
+                return False
+        return super().fill_outputs()
+
+    def export_config_outputs(self) -> Dict[str, Any]:
+        outputs = dict(super().export_config_outputs())
+        if self.check == "eco" and self.ran_patch_eco_designs:
+            outputs["formal.outputs.eco_netlist"] = self.eco_netlist_path
+            outputs["formal.outputs.eco_patch"] = self.eco_patch_path
+            outputs["formal.outputs.eco_innovus_script"] = self.eco_innovus_script_path
+        return outputs
+
+    @property
+    def eco_patch_path(self) -> str:
+        return os.path.join(self.run_dir, "patch.v")
+
+    @property
+    def eco_netlist_path(self) -> str:
+        return os.path.join(self.run_dir, f"{self.top_module}.eco.v")
+
+    @property
+    def eco_innovus_script_path(self) -> str:
+        return os.path.join(self.run_dir, "eco.invs")
+
+    @property
+    def ran_patch_eco_designs(self) -> bool:
+        """ The patch_eco_designs step sets this to True if it was run """
+        return self.attr_getter("_ran_patch_eco_designs", False)
+
+    @ran_patch_eco_designs.setter
+    def ran_patch_eco_designs(self, val: bool) -> None:
+        self.attr_setter("_ran_patch_eco_designs", val)
 
     def generate_open_checkpoint(self) -> bool:
         # Make sure that generated-scripts exists.

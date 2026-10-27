@@ -960,7 +960,7 @@ formal.inputs:
   # - constraint: design constaint (SDC) checking (not yet supported)
   # - cdc: clock domain crossing checking (not yet supported)
   # - property: contention, tristate, don't care, etc. checking (not yet supported)
-  # - eco: engineering change order generation (not yet supported)
+  # - eco: functional engineering change order; patches input_files to match reference_files (see par-to-eco)
   # type: str
 
   input_files: [] # Input files.
@@ -969,6 +969,11 @@ formal.inputs:
   # type: List[str]
 
   reference_files: [] # The reference (golden) design files for equivalence checks
+  # type: List[str]
+
+  eco_reference_files: [] # For the eco stage: the netlist synthesized from the corrected RTL.
+  # par-to-eco makes it the reference_files the post-par netlist is patched to match.
+  # Under formal.* so that adding it after par leaves syn and par cached.
   # type: List[str]
 
   top_module: null # Top RTL module for running verification on

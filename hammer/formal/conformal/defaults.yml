@@ -19,5 +19,7 @@ formal.conformal:
 formal.inputs:
   # Check type to run. Supported types in this plugin:
   # - lec: logical equivalence checking
+  # - eco: functional ECO, run by the eco stage (lec -ECOGXL, or lec -ECO with an XL license);
+  #   patches the post-par netlist to match formal.inputs.eco_reference_files
   # Note: select features will require a XL/GXL license (see license_level key).
   check: "lec"
