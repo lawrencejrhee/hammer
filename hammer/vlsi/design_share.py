@@ -20,6 +20,7 @@ import ast
 import contextlib
 import datetime
 import getpass
+import gzip
 import hashlib
 import io
 import json
@@ -28,6 +29,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import zlib
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
@@ -358,6 +360,11 @@ def _real_entry(path: str) -> str:
     return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
 
 
+def _member_sha256(tar: tarfile.TarFile, member: tarfile.TarInfo) -> str:
+    src = tar.extractfile(member)
+    return hashlib.sha256(src.read() if src is not None else b"").hexdigest()
+
+
 def _check_member(member: tarfile.TarInfo) -> str:
     """The member's relative path, or ShareError for anything but a plain file or directory inside
     work/ or obj/."""
@@ -392,6 +399,7 @@ def unpack(data: bytes, manifest: Dict[str, Any], work_dir: str, obj_dir: str) -
         pairs += [(form, work_dir) for form in _forms(source["work_dir"])]
     pairs.sort(key=lambda p: -len(p[0]))
     rewrite = set(manifest.get("rewrite") or [])
+    expected = manifest.get("files") or {}
     written = []
     real_work = os.path.realpath(work_dir)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
@@ -405,7 +413,13 @@ def unpack(data: bytes, manifest: Dict[str, Any], work_dir: str, obj_dir: str) -
                 target = real if member.isdir() else os.path.join(real, os.path.basename(dest))
                 raise ShareError(f"the bundle's {member.name!r} would be written to {target}, which is outside "
                                  f"{work_dir}; refusing the bundle.")
+            if expected and member.isfile() and expected.get(member.name) != _member_sha256(tar, member):
+                raise ShareError(f"the bundle's {member.name!r} does not match its manifest, so the bundle is "
+                                 f"damaged; ask its owner to publish it again.")
             plan.append((member, rel, dest))
+        if expected and {m.name for m, _, _ in plan if m.isfile()} != set(expected):
+            raise ShareError("the bundle's files do not match its manifest, so the bundle is damaged; ask its owner "
+                             "to publish it again.")
         for member, rel, dest in plan:
             if member.isdir():
                 os.makedirs(dest, exist_ok=True)
@@ -454,6 +468,10 @@ def pull(owner: str, design: str, into: str, env_configs: Optional[List[str]] = 
     if manifest.get("version") != BUNDLE_VERSION:
         raise ShareError(f"the bundle is format {manifest.get('version')}, this Hammer reads {BUNDLE_VERSION}; "
                          f"update Hammer.")
+    size = rec.get("size_bytes")
+    if size is not None and len(rec["data"]) != size:
+        raise ShareError(f"{owner}'s bundle of {design} came back with {len(rec['data'])} of its {size} bytes, so "
+                         f"it is damaged; ask {owner} to publish it again.")
     work_dir = os.path.realpath(into)
     state_path = os.path.join(work_dir, STATE_FILE)
     previous: Dict[str, Any] = {}
@@ -475,8 +493,12 @@ def pull(owner: str, design: str, into: str, env_configs: Optional[List[str]] = 
     if not _inside(root, real_obj):
         raise ShareError(f"the bundle's build dir {obj_dir} leads to {real_obj}, which is outside {work_dir}; "
                          f"refusing the bundle.")
+    try:
+        written = unpack(rec["data"], manifest, work_dir, obj_dir)
+    except (tarfile.TarError, EOFError, zlib.error, gzip.BadGzipFile) as e:
+        raise ShareError(f"{owner}'s bundle of {design} is damaged ({type(e).__name__}: {e}); ask {owner} to "
+                         f"publish it again.") from e
     os.makedirs(obj_dir, exist_ok=True)
-    written = unpack(rec["data"], manifest, work_dir, obj_dir)
     kept = {_real_entry(os.path.normpath(os.path.join(work_dir, w))) for w in written}
     for old in previous.get("files", []):
         if not isinstance(old, str):

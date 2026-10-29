@@ -2686,8 +2686,6 @@ def current_db_user() -> str:
 def publish_design_bundle(design: str, manifest: Dict[str, Any], data: bytes, bundle_sha: str) -> bool:
     """Store the caller's latest bundle of ``design``. False when the stored bundle already has
     ``bundle_sha``, so an unchanged design is not uploaded again."""
-    chunks = [data[i:i + BLOB_CHUNK_BYTES] for i in range(0, len(data), BLOB_CHUNK_BYTES)]
-    inline = data if len(chunks) <= 1 else b""
     conn = _connect()
     try:
         _ensure_schema(conn, quiet=True)
@@ -2698,6 +2696,8 @@ def publish_design_bundle(design: str, manifest: Dict[str, Any], data: bytes, bu
             if row is not None and row[0] == bundle_sha:
                 conn.commit()
                 return False
+            chunks = _chunks(data)
+            inline = data if len(chunks) <= 1 else b""
             cur.execute(
                 f"""
                 INSERT INTO {FQ_DESIGN_BUNDLE} (design, bundle_sha, manifest, data, size_bytes)
@@ -2723,27 +2723,26 @@ def publish_design_bundle(design: str, manifest: Dict[str, Any], data: bytes, bu
 
 
 def fetch_design_bundle(owner: str, design: str) -> Optional[Dict[str, Any]]:
-    """``owner``'s latest bundle of ``design`` as {manifest, data, bundle_sha, updated_at}, or None when it
-    does not exist or was not shared with the caller."""
+    """``owner``'s latest bundle of ``design`` as {manifest, data, bundle_sha, updated_at, size_bytes}, or None
+    when it does not exist or was not shared with the caller."""
     conn = _connect()
     try:
+        # One snapshot for both reads, so a republish or unshare between them cannot mix two bundles.
+        conn.set_session(isolation_level="REPEATABLE READ", readonly=True)
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT manifest, data, bundle_sha, updated_at FROM {FQ_DESIGN_BUNDLE} "
+                f"SELECT manifest, data, bundle_sha, updated_at, size_bytes FROM {FQ_DESIGN_BUNDLE} "
                 f"WHERE owner = %s AND design = %s", (owner, design))
             row = cur.fetchone()
-            if row is None:
-                return None
-            data = bytes(row[1]) if row[1] is not None else b""
-            if not data:
-                cur.execute(
-                    f"SELECT data FROM {FQ_DESIGN_BUNDLE_CHUNK} WHERE owner = %s AND design = %s ORDER BY seq",
-                    (owner, design))
-                data = b"".join(bytes(c[0]) for c in cur.fetchall())
+        if row is None:
+            return None
+        data = bytes(row[1]) if row[1] is not None and len(row[1]) else _read_chunks(
+            conn, f"SELECT data FROM {FQ_DESIGN_BUNDLE_CHUNK} WHERE owner = %s AND design = %s ORDER BY seq",
+            (owner, design))
     finally:
         conn.close()
     return {"manifest": row[0], "data": data, "bundle_sha": row[2],
-            "updated_at": row[3].isoformat() if hasattr(row[3], "isoformat") else row[3]}
+            "updated_at": row[3].isoformat() if hasattr(row[3], "isoformat") else row[3], "size_bytes": row[4]}
 
 
 def share_design(design: str, grantee: str) -> None:
