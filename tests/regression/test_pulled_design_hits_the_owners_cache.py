@@ -42,6 +42,10 @@ class FakeDB:
     def share(self, design, grantee):
         self.shares.add((self.user, design, grantee))
 
+    def stored(self, design):
+        current = self.bundles.get((self.user, design))
+        return {"source": current["manifest"].get("source")} if current is not None else None
+
 
 @pytest.fixture
 def db(monkeypatch, tmp_path):
@@ -53,6 +57,7 @@ def db(monkeypatch, tmp_path):
     monkeypatch.setattr(pd_store, "share_design", fake.share)
     monkeypatch.setattr(pd_store, "design_has_shares",
                         lambda design: any(o == fake.user and d == design for o, d, _ in fake.shares))
+    monkeypatch.setattr(pd_store, "stored_design_bundle", fake.stored)
     monkeypatch.setattr(pd_store, "current_db_user", lambda: fake.user)
     monkeypatch.setattr(pd_cache, "_record_cache_event", lambda *a, **k: None)
     monkeypatch.setattr(pd_cache, "_stamp_project_from_config", lambda *a, **k: None)

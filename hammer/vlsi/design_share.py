@@ -327,10 +327,18 @@ def bundle_from_driver(driver: Any, owner: Optional[str] = None) -> Bundle:
                         {"default": list(driver.options.project_configs)}, "default", sys.argv[0], config, owner)
 
 
+def _driver_work_dir(driver: Any) -> str:
+    """The working directory bundle_from_driver packs for a running action."""
+    dag_file = os.path.join(driver.obj_dir, "hammer_dag.py")
+    return read_dag(dag_file)["WORK_DIR"] if os.path.isfile(dag_file) else os.getcwd()
+
+
 def republish_if_shared(driver: Any) -> Optional[str]:
     """After a successful syn: if this design is shared, publish its bundle again when its files changed, so
-    partners who pull get what this run built. Returns a one-line note, or None when nothing was done.
-    Never raises; sharing must not fail a stage that succeeded."""
+    partners who pull get what this run built. Only the checkout the stored bundle was published from (by
+    real path) republishes it; a bundle that records no source is never republished from a pulled copy.
+    Returns a one-line note, or None when nothing was done. Never raises; sharing must not fail a stage that
+    succeeded."""
     from hammer.vlsi import pd_cache, pd_store
     try:
         if not pd_cache.is_cache_enabled(driver):
@@ -341,6 +349,15 @@ def republish_if_shared(driver: Any) -> Optional[str]:
     except Exception:
         return None  # no database, or no sharing tables yet: nothing is shared that could need refreshing
     try:
+        work_dir = _driver_work_dir(driver)
+        source = ((pd_store.stored_design_bundle(design) or {}).get("source") or {}).get("work_dir")
+        if source:
+            if os.path.realpath(source) != os.path.realpath(work_dir):
+                return (f"left the shared {design} bundle as it is, since it was published from {source}, not "
+                        f"from {work_dir}; studio publish {design} --obj-dir {driver.obj_dir} shares this "
+                        f"checkout instead")
+        elif os.path.isfile(os.path.join(os.path.realpath(work_dir), STATE_FILE)):
+            return None
         bundle = bundle_from_driver(driver)
         if pd_store.publish_design_bundle(design, bundle.manifest, bundle.data, bundle.bundle_sha):
             return f"published the updated {design} bundle for its partners ({len(bundle.data)} bytes)"

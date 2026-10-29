@@ -119,6 +119,7 @@ __all__ = [
     "share_design",
     "unshare_design",
     "design_has_shares",
+    "stored_design_bundle",
     "list_design_shares",
 ]
 
@@ -2783,6 +2784,22 @@ def design_has_shares(design: str) -> bool:
             return cur.fetchone() is not None
     finally:
         conn.close()
+
+
+def stored_design_bundle(design: str) -> Optional[Dict[str, Any]]:
+    """What the caller's stored bundle of ``design`` records, as {source}: the {work_dir, obj_dir} it was
+    published from, or None. None when the caller has no bundle of ``design``."""
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT manifest -> 'source' FROM {FQ_DESIGN_BUNDLE} WHERE owner = current_user "
+                        "AND design = %s", (design,))
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {"source": row[0] if isinstance(row[0], dict) else None}
 
 
 def list_design_shares() -> List[Dict[str, Any]]:

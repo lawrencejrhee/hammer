@@ -134,5 +134,6 @@ def test_republish_does_nothing_without_the_cache_or_a_share(monkeypatch, tmp_pa
     monkeypatch.setattr(pd_store, "design_has_shares", lambda design: (_ for _ in ()).throw(OSError("db down")))
     assert design_share.republish_if_shared(driver) is None   # can't tell it is shared: stay quiet
     monkeypatch.setattr(pd_store, "design_has_shares", lambda design: True)
+    monkeypatch.setattr(pd_store, "stored_design_bundle", lambda design: None)
     monkeypatch.setattr(design_share, "bundle_from_driver", lambda d: (_ for _ in ()).throw(OSError("disk")))
     assert "could not refresh" in design_share.republish_if_shared(driver)
