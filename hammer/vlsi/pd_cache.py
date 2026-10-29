@@ -447,17 +447,18 @@ def _rebase_restored_paths(rundir_path: Path, output_filename: str,
                       and os.path.realpath(orig_work) != os.path.realpath(cwd))
         if not obj_moves and not work_moves:
             return 0
-        # only whole-path matches: /a/build/ChipTop must not touch /a/build/ChipTop-iso
-        pat = re.compile(re.escape(orig) + r'(/' + re.escape(stored) + r')?(?=/|["\s,\]])') if obj_moves else None
-        work_pat = re.compile(re.escape(orig_work) + r'(?=/|["\s,\]])') if work_moves else None
+        moves: Dict[str, str] = {}
+        if work_moves and orig_work is not None and cwd is not None:
+            moves[orig_work] = cwd
+        if orig is not None:
+            moves[orig] = new_dir if obj_moves else orig
+            moves[f"{orig}/{stored}"] = f"{new_dir}/{name}" if obj_moves else f"{orig}/{stored}"
+        # one pass over whole paths, longest prefix first: /a/build/ChipTop must not touch /a/build/ChipTop-iso
+        pat = re.compile("(?:" + "|".join(map(re.escape, sorted(moves, key=len, reverse=True))) + r')(?=/|["\s,\]])')
         changed = 0
         for jf in rundir_path.glob("*.json"):
             s = jf.read_text()
-            t = s
-            if pat is not None:
-                t = pat.sub(lambda m: f"{new_dir}/{name}" if m.group(1) else new_dir, t)
-            if work_pat is not None:
-                t = work_pat.sub(lambda m: cwd, t)
+            t = pat.sub(lambda m: moves[m.group(0)], s)
             if t != s:
                 jf.write_text(t)
                 changed += 1

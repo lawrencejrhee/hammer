@@ -360,9 +360,14 @@ def _check_member(member: tarfile.TarInfo) -> str:
 
 
 def _rewrite(text: str, pairs: List[Tuple[str, str]]) -> str:
-    for old, new in pairs:
-        text = re.sub(re.escape(old) + r"(?=$|[/\s\"'{}\[\]();,=<>|:])", new.replace("\\", "\\\\"), text)
-    return text
+    new: Dict[str, str] = {}
+    for old, replacement in pairs:
+        new.setdefault(old, replacement)
+    if not new:
+        return text
+    # one pass, longest prefix first, so a replacement is never rewritten again
+    olds = "|".join(map(re.escape, sorted(new, key=len, reverse=True)))
+    return re.sub(f"(?:{olds})" + r"(?=$|[/\s\"'{}\[\]();,=<>|:])", lambda m: new[m.group(0)], text)
 
 
 def unpack(data: bytes, manifest: Dict[str, Any], work_dir: str, obj_dir: str) -> List[str]:
