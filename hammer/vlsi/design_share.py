@@ -129,8 +129,9 @@ def _walk(directory: str, prune: Callable[[str], bool]) -> Iterator[str]:
         seen.add(real)
         dirs[:] = sorted(d for d in dirs if not d.startswith(".") and not prune(os.path.join(top, d)))
         for name in sorted(files):
-            if not fingerprints.skip_name(name):
-                yield os.path.join(top, name)
+            path = os.path.join(top, name)
+            if not fingerprints.skip_name(name) and os.path.isfile(path):
+                yield path
 
 
 # --- building a bundle ---------------------------------------------------------------------------------
@@ -256,7 +257,7 @@ def _pack(files: Dict[str, str]) -> bytes:
     """gzip tar of the files under their arcnames, mtimes kept (fingerprints key files too big to hash by
     whole-second mtime) and owners scrubbed."""
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+    with tarfile.open(fileobj=buf, mode="w:gz", dereference=True) as tar:
         for name in sorted(files):
             info = tar.gettarinfo(files[name], arcname=name)
             info.uid = info.gid = 0
