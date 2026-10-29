@@ -27,7 +27,7 @@ from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping, Name
 
 from pydantic import ValidationError
 
-from hammer.config.config_src import RUN_CONTROL_KEYS, StageGraph, load_config_from_defaults
+from hammer.config.config_src import RUN_CONTROL_KEYS, StageGraph, load_config_from_defaults, run_control_keys
 
 CONTENT_HASH_LIMIT = 256 * 1024 * 1024
 DIR_WALK_CAP = 5000
@@ -431,8 +431,9 @@ def _config_entries(db: Dict[str, Any], roots: Roots, stage_tag: Optional[str],
     rtl = {_norm(p) for p in (_string_list(db.get(RTL_KEY)) if rtl_set is None else rtl_set)}
     own_prefixes = _dir_prefixes(own_rundir) if stage_tag else ()
     skip_tools = unselected_tool_prefixes(db, stage_tag) if stage_tag else ()
+    control = run_control_keys(db)
     for key, value in db.items():
-        if skip_key(key) or (upstream_only and not key.startswith(f"{stage_tag}.inputs.")):
+        if skip_key(key) or key in control or (upstream_only and not key.startswith(f"{stage_tag}.inputs.")):
             continue
         if skip_tools and key.startswith(skip_tools):
             continue

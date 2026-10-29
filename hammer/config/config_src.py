@@ -15,7 +15,7 @@ from decimal import Decimal
 from enum import Enum
 from importlib import resources
 from functools import lru_cache, reduce
-from typing import (Any, Callable, Dict, Iterable, List, NamedTuple, Optional,
+from typing import (Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, NamedTuple, Optional,
                     Set, Tuple, Union)
 
 from hammer.logging import HammerVLSILogging, HammerVLSILoggingContext
@@ -848,6 +848,15 @@ RUN_CONTROL_KEYS = frozenset({
 })
 
 
+def run_control_keys(db: Mapping[str, Any]) -> FrozenSet[str]:
+    """RUN_CONTROL_KEYS, every <namespace>.submit.* key, and the keys a <namespace>.submit.settings names, found by
+    their equal non-empty list value since a resolved config keeps no crossref names."""
+    submit = {k for k in db if len(k.split(".")) > 2 and k.split(".")[1] == "submit"}
+    settings = [db[k] for k in submit if k.endswith(".submit.settings") and isinstance(db[k], list) and db[k]]
+    named = {k for k, v in db.items() if isinstance(v, list) and v and v in settings}
+    return RUN_CONTROL_KEYS | submit | named
+
+
 class HammerDatabase:
     """
     Define a database which is composed of a set of overridable configs.
@@ -1225,7 +1234,6 @@ class HammerDatabase:
 
         # Load or initialize master DB
         master_path = Path(filename)
-        _MASTER_DB_SKIP_KEYS = {"vlsi.hammer_dir"} | RUN_CONTROL_KEYS
         master_db_contents: Optional[dict]
         try:
             text = master_path.read_text()
@@ -1240,6 +1248,8 @@ class HammerDatabase:
         stagePath = set()
 
         new_db_contents = json.loads(config_json if config_json is not None else self.get_database_json())
+        _MASTER_DB_SKIP_KEYS = ({"vlsi.hammer_dir"} | run_control_keys(new_db_contents)
+                                | run_control_keys(master_db_contents or {}))
 
         def curStageCheck(tag:str, stage:str):
             keyChangeFlag = False
