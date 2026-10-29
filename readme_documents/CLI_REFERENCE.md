@@ -141,7 +141,7 @@ the configs alone, so it runs once for the whole design, alongside the first sta
 | `--forceall`, `--redo-all` | the same for every stage the run executes, earlier ones included |
 | `--local` | skip the DB cache pull, run the tool locally |
 | `--from-step` / `--to-step` / `--only-step` | sub-step control |
-| `--steps-stage {syn,par}` | which stage the step flags apply to |
+| `--steps-stage {syn,par}` | which stage the step flags apply to; defaults to whichever of syn/par the run names, and is required when it names both or neither |
 | `--workspace`, `--project` | workspace routing, ledger project label |
 | `--run-id` | name the run instead of an auto `cli_<epoch>` |
 | `--no-wait` | trigger and return immediately |
@@ -327,7 +327,7 @@ Identical to `hammer-vlsi` unless noted.
 |---|---|---|
 | `-e`, `-p` | yes | n/a — configs are baked in at `make buildfile` |
 | `--obj_dir` | yes | optional — read from the registered DAG |
-| `-t`, `--top` | yes | yes (`--design` also accepted) |
+| `-t`, `--top` | yes (sets `synthesis.inputs.top_module`) | yes, but it picks the registered DAG by design name (the obj_dir basename), not the top module (`--design` also accepted) |
 | `--force` | yes | yes (`--redo` also accepted); forces only the named stages |
 | `--forceall` | n/a | forces every stage the run executes (`--redo-all` also accepted) |
 | `--local` | yes | yes |
