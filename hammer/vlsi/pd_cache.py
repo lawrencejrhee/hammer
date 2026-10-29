@@ -367,8 +367,8 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
     return pd_store.compute_stage_key(db, stage_tag)
 
 
-# Written into a rundir before it is stored: the working directory the stage ran from, so a restore
-# elsewhere (a partner's pulled copy of the design) can point paths into it at its own.
+# Written into a rundir before it is stored when the cache key names the working directory as <WORK_DIR>, so a
+# restore elsewhere (a partner's pulled copy of the design) can point paths into it at its own.
 ORIGIN_MARKER = ".pd_cache_origin.json"
 
 
@@ -379,16 +379,23 @@ def _current_dir() -> Optional[str]:
         return None
 
 
+def _is_work_root(work_dir: str, obj_dir: Optional[str]) -> bool:
+    """Whether fingerprints.make_roots keeps work_dir as the <WORK_DIR> root beside obj_dir."""
+    return any(token == "<WORK_DIR>" for _, token in fingerprints.make_roots(None, obj_dir, work_dir=work_dir))
+
+
 def _stored_work_dir(rundir_path: Path, orig_obj: Optional[str], new_obj: str) -> Optional[str]:
-    """The working directory a blob was stored from: its origin marker, else (blobs from before the marker)
-    the stored obj_dir placed where this obj_dir sits under the current working directory."""
+    """The working directory a blob was stored from: its origin marker when both it and the current working
+    directory are <WORK_DIR> roots, else the stored obj_dir placed where this obj_dir sits under the current
+    working directory."""
+    cwd = _current_dir()
     try:
         work = json.loads((rundir_path / ORIGIN_MARKER).read_text()).get("work_dir")
-        if isinstance(work, str) and os.path.isabs(work):
+        if (isinstance(work, str) and os.path.isabs(work) and _is_work_root(work, orig_obj)
+                and cwd is not None and _is_work_root(cwd, new_obj)):
             return work
     except (OSError, ValueError, AttributeError):
         pass
-    cwd = _current_dir()
     if orig_obj is None or cwd is None:
         return None
     for c in {os.path.normpath(cwd), os.path.realpath(cwd)}:
@@ -760,11 +767,13 @@ def cache_or_run(
             except Exception as e:
                 _warn(f"PD cache: could not pre-write {output_filename} ({e}); tarball may lack it.")
             cwd = _current_dir()
-            if cwd is not None:
-                try:
-                    (Path(rundir) / ORIGIN_MARKER).write_text(json.dumps({"work_dir": cwd}) + "\n")
-                except OSError as e:
-                    _warn(f"PD cache: could not record where {stage_tag} ran ({e}).")
+            marker = Path(rundir) / ORIGIN_MARKER
+            try:
+                marker.unlink(missing_ok=True)
+                if cwd is not None and any(token == "<WORK_DIR>" for _, token in fingerprints.path_roots(driver)):
+                    marker.write_text(json.dumps({"work_dir": cwd}) + "\n")
+            except OSError as e:
+                _warn(f"PD cache: could not record where {stage_tag} ran ({e}).")
 
             # store cost = tarring/compressing the rundir + uploading the blob
             # to Postgres. This is the one-time overhead SledgeHammer pays on a
