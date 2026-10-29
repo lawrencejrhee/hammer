@@ -21,13 +21,15 @@ load_stage_blob returns None and the stage runs from scratch.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
+import stat
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     # POSIX-only; harmless to skip on Windows since the cache is Linux-only.
@@ -398,8 +400,102 @@ def _stored_work_dir(rundir_path: Path, orig_obj: Optional[str], new_obj: str) -
     return None
 
 
+_SCRIPT_REBASE_LIMIT = 1 << 20
+
+
+def _moved_link_target(target: str, moves: Dict[str, str]) -> Optional[str]:
+    """Where an absolute link target without '..' parts points once the dirs in ``moves`` move, or None."""
+    if not os.path.isabs(target) or ".." in target.split("/"):
+        return None
+    for old in sorted(moves, key=len, reverse=True):
+        if target == old or target.startswith(old + "/"):
+            new = moves[old] + target[len(old):]
+            return None if new == target else new
+    return None
+
+
+def _relink_restored_links(rundir_path: Path, moves: Dict[str, str]) -> Tuple[int, List[str]]:
+    """Point the absolute links at any depth of a restored rundir into a dir in ``moves`` at the same entry of
+    its new place, relatively when that lies in the rundir, never following a link, and return the number of
+    links changed and the problems met."""
+    rundir = str(rundir_path)
+    changed = 0
+    problems: List[str] = []
+    dirs = [rundir]
+    while dirs:
+        top = dirs.pop()
+        try:
+            with os.scandir(top) as it:
+                entries = sorted(it, key=lambda e: e.name)
+        except OSError as e:
+            problems.append(f"{os.path.relpath(top, rundir)} ({e.strerror or e})")
+            continue
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    new = _moved_link_target(os.readlink(entry.path), moves)
+                    if new is None:
+                        continue
+                    if new == rundir or new.startswith(rundir + "/"):
+                        new = os.path.relpath(new, top)
+                    tmp = os.path.join(top, f".{entry.name}.rebase-{os.getpid()}")
+                    os.symlink(new, tmp)
+                    try:
+                        os.replace(tmp, entry.path)
+                    except OSError:
+                        with contextlib.suppress(OSError):
+                            os.unlink(tmp)
+                        raise
+                    changed += 1
+                elif entry.is_dir(follow_symlinks=False):
+                    dirs.append(entry.path)
+            except OSError as e:
+                problems.append(f"{os.path.relpath(entry.path, rundir)} ({e.strerror or e})")
+    return changed, problems
+
+
+def _rebase_restored_scripts(rundir_path: Path, rewrite: Callable[[str], str],
+                             moves: Dict[str, str]) -> Tuple[int, List[str]]:
+    """Rewrite the paths in a restored rundir's enter file and the regular files directly in its
+    generated-scripts, and relink its absolute links into the dirs in ``moves``, returning the number of
+    entries changed and the problems met."""
+    changed = 0
+    problems: List[str] = []
+    files = [rundir_path / "enter"]
+    scripts = rundir_path / "generated-scripts"
+    with contextlib.suppress(OSError):
+        if stat.S_ISDIR(os.lstat(scripts).st_mode):
+            files += sorted(scripts.iterdir())
+    for path in files:
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > _SCRIPT_REBASE_LIMIT:
+                continue
+            with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as f:
+                text = f.read().decode("utf-8")
+            new = rewrite(text)
+            if new == text:
+                continue
+            tmp = path.with_name(f".{path.name}.rebase-{os.getpid()}")
+            try:
+                with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
+                    f.write(new.encode("utf-8"))
+                os.chmod(tmp, stat.S_IMODE(st.st_mode))
+                os.replace(tmp, path)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp)
+            changed += 1
+        except (FileNotFoundError, UnicodeDecodeError):
+            continue
+        except OSError as e:
+            problems.append(f"{path.name} ({e.strerror or e})")
+    links, link_problems = _relink_restored_links(rundir_path, moves)
+    return changed + links, problems + link_problems
+
+
 def _rebase_restored_paths(rundir_path: Path, output_filename: str,
-                           info=None, stored_name: Optional[str] = None) -> int:
+                           info=None, stored_name: Optional[str] = None, warn=None) -> int:
     """Point a restored rundir's json outputs at the dir it was restored into.
 
     A blob stored from one build dir carries that dir's absolute paths in its
@@ -417,11 +513,14 @@ def _rebase_restored_paths(rundir_path: Path, output_filename: str,
     cannot be rewritten, or a rundir restored under a new name is a symlink,
     holds a symlinked top-level json or has no path under its stored name, it
     removes the output json (or the symlinked rundir itself) and raises, so
-    the restore counts as a miss.
+    the restore counts as a miss. The generated scripts and enter file get the
+    same rewrite, absolute links at any depth into a moved dir point at the same
+    entry of its new place, and a failure there only warns.
     """
     import os
     import re
     info = info or (lambda msg: None)
+    warn = warn or info
     try:
         new_dir = str(rundir_path.parent)
         name = rundir_path.name
@@ -445,7 +544,7 @@ def _rebase_restored_paths(rundir_path: Path, output_filename: str,
         cwd = _current_dir()
         work_moves = (orig_work is not None and cwd is not None
                       and os.path.realpath(orig_work) != os.path.realpath(cwd))
-        if not obj_moves and not work_moves:
+        if rundir_path.is_symlink() or (not obj_moves and not work_moves):
             return 0
         moves: Dict[str, str] = {}
         if work_moves and orig_work is not None and cwd is not None:
@@ -454,19 +553,34 @@ def _rebase_restored_paths(rundir_path: Path, output_filename: str,
             moves[orig] = new_dir if obj_moves else orig
             moves[f"{orig}/{stored}"] = f"{new_dir}/{name}" if obj_moves else f"{orig}/{stored}"
         # one pass over whole paths, longest prefix first: /a/build/ChipTop must not touch /a/build/ChipTop-iso
-        pat = re.compile("(?:" + "|".join(map(re.escape, sorted(moves, key=len, reverse=True))) + r')(?=/|["\s,\]])')
+        pat = re.compile("(?:" + "|".join(map(re.escape, sorted(moves, key=len, reverse=True))) + ")"
+                         + r"""(?=[/"'\s,\]};:]|$)""")
+
+        def rewrite(s: str) -> str:
+            return pat.sub(lambda m: moves[m.group(0)], s)
+
         changed = 0
         for jf in rundir_path.glob("*.json"):
+            if jf.is_symlink():
+                continue
             s = jf.read_text()
-            t = pat.sub(lambda m: moves[m.group(0)], s)
+            t = rewrite(s)
             if t != s:
                 jf.write_text(t)
                 changed += 1
-        if changed:
+        try:
+            scripts, problems = _rebase_restored_scripts(rundir_path, rewrite, moves)
+        except Exception as e:
+            scripts, problems = 0, [str(e)]
+        if problems:
+            shown = "; ".join(problems[:5]) + (f"; {len(problems) - 5} more" if len(problems) > 5 else "")
+            warn(f"PD cache: could not point {shown} of restored {name} at {rundir_path}; "
+                 f"they keep the stored paths.")
+        if changed or scripts:
             info(f"PD cache: restored {name} was stored from {orig or new_dir}/{stored}"
                  f"{f' (working directory {orig_work})' if work_moves else ''}; "
-                 f"rewrote {changed} json file(s) to {rundir_path}")
-        return changed
+                 f"rewrote {changed} json file(s) and {scripts} script(s) or link(s) to {rundir_path}")
+        return changed + scripts
     except Exception as e:
         try:
             # unlink a symlinked rundir itself, never a file through it
@@ -570,7 +684,7 @@ def cache_or_run(
         try:
             rundir_path.parent.mkdir(parents=True, exist_ok=True)
             stored_name = pd_store.untar_to_directory(data, rundir_path.parent, as_name=rundir_path.name)
-            _rebase_restored_paths(rundir_path, output_filename, _info, stored_name)
+            _rebase_restored_paths(rundir_path, output_filename, _info, stored_name, warn=_warn)
             output_path = rundir_path / output_filename
             with output_path.open("r") as f:
                 output = json.load(f)
@@ -906,7 +1020,7 @@ def try_restore_from_cache(
     try:
         rundir_path.parent.mkdir(parents=True, exist_ok=True)
         stored_name = pd_store.untar_to_directory(data, rundir_path.parent, as_name=rundir_path.name)
-        _rebase_restored_paths(rundir_path, output_filename, _info, stored_name)
+        _rebase_restored_paths(rundir_path, output_filename, _info, stored_name, warn=_warn)
         restore_seconds = time.monotonic() - _restore_t0
         saved = None
         saved_cpu = None
