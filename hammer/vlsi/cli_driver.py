@@ -1402,7 +1402,11 @@ class CLIDriver:
 
     def par_to_timing_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
         """Create a full config to run the output."""
-        timing_input_only = HammerDriver.par_output_to_timing_input(driver.project_config)
+        par_output = driver.project_config
+        if par_output.get("par.outputs.output_physical_netlist") in (None, "", "None"):
+            # Par tools without a physical netlist record it as the string "None".
+            par_output.pop("par.outputs.output_physical_netlist", None)
+        timing_input_only = HammerDriver.par_output_to_timing_input(par_output)
         if timing_input_only is None:
             driver.log.error("Input config does not appear to contain valid par outputs")
             return None
