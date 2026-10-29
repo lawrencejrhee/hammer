@@ -128,6 +128,28 @@ def _pegasus_lvs_verdict(run_dir: str, top_module: str) -> Optional[str]:
     return "NOT COMPARED"
 
 
+def _recorded_rtl_fingerprint(obj_dir: str) -> Optional[str]:
+    try:
+        with open(os.path.join(obj_dir, "master_database.json")) as f:
+            value = json.load(f).get("vlsi.rtl_fingerprint_sha256")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def _reads_missing_rtl(driver: HammerDriver, action_type: str) -> bool:
+    """True when a sim, power or formal action's own input or reference files list an RTL file that is missing."""
+    if action_type not in ("sim", "power", "formal"):
+        return False
+
+    def paths(key: str) -> List[str]:
+        if not driver.database.has_setting(key):
+            return []
+        return [os.path.realpath(p) for p in driver.database.get_setting(key, nullvalue=[]) or [] if isinstance(p, str)]
+    gone = {p for p in paths("synthesis.inputs.input_files") if not os.path.isfile(p)}
+    return any(p in gone for key in ("input_files", "reference_files") for p in paths(f"{action_type}.inputs.{key}"))
+
+
 def dump_config_to_json_file(output_path: str, config: dict) -> None:
     """
     Helper function to dump the given config to the given output path while overwriting it if it already exists.
@@ -687,8 +709,21 @@ class CLIDriver:
                             "to restore the elaborated-design fingerprint.")
                     driver.database.set_setting("vlsi.rtl_fingerprint_sha256", overall_sha256)
             except FileNotFoundError as e:
-                driver.log.error(f"RTL file not found: {e.filename}")
-                return None
+                if action_type in ("synthesis", "syn") or _reads_missing_rtl(driver, action_type):
+                    driver.log.error(f"RTL file not found: {e.filename}")
+                    return None
+                # Stages that read syn's outputs instead of the RTL keep the fingerprint recorded with those outputs.
+                recorded = _recorded_rtl_fingerprint(driver.obj_dir)
+                if recorded is not None:
+                    if recorded.startswith("bytes:"):
+                        # A byte-hash fingerprint's collateral fingerprint also covers the include dirs.
+                        rtl_include_walk = list(driver.database.get_setting("synthesis.inputs.include_dirs", nullvalue=[]))
+                    driver.database.set_setting("vlsi.rtl_fingerprint_sha256", recorded)
+                    driver.log.warning(f"RTL file not found: {e.filename}. Running {action_type} with the RTL "
+                                       "fingerprint recorded in master_database.json.")
+                else:
+                    driver.log.warning(f"RTL file not found: {e.filename}. Running {action_type} "
+                                       "without the RTL fingerprint.")
             except Exception as e:
                 driver.log.error(f"Failed to compute RTL fingerprint: {e}")
                 return None
