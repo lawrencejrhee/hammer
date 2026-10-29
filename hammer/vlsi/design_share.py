@@ -348,6 +348,16 @@ def republish_if_shared(driver: Any) -> Optional[str]:
 
 # --- pulling --------------------------------------------------------------------------------------------
 
+def _inside(root: str, real: str) -> bool:
+    """Whether the real path ``real`` is the real path ``root`` or lies under it."""
+    return os.path.commonpath([root, real]) == root
+
+
+def _real_entry(path: str) -> str:
+    """``path`` with its parent folder resolved, so each file has one name however the folder is reached."""
+    return os.path.join(os.path.realpath(os.path.dirname(path)), os.path.basename(path))
+
+
 def _check_member(member: tarfile.TarInfo) -> str:
     """The member's relative path, or ShareError for anything but a plain file or directory inside
     work/ or obj/."""
@@ -383,11 +393,20 @@ def unpack(data: bytes, manifest: Dict[str, Any], work_dir: str, obj_dir: str) -
     pairs.sort(key=lambda p: -len(p[0]))
     rewrite = set(manifest.get("rewrite") or [])
     written = []
+    real_work = os.path.realpath(work_dir)
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        plan = []
         for member in tar.getmembers():
             rel = _check_member(member)
             root = work_dir if member.name.startswith("work/") else obj_dir
             dest = os.path.join(root, *rel.split("/")) if rel else root
+            real = os.path.realpath(dest if member.isdir() else os.path.dirname(dest))
+            if not _inside(real_work, real):
+                target = real if member.isdir() else os.path.join(real, os.path.basename(dest))
+                raise ShareError(f"the bundle's {member.name!r} would be written to {target}, which is outside "
+                                 f"{work_dir}; refusing the bundle.")
+            plan.append((member, rel, dest))
+        for member, rel, dest in plan:
             if member.isdir():
                 os.makedirs(dest, exist_ok=True)
                 continue
@@ -435,7 +454,7 @@ def pull(owner: str, design: str, into: str, env_configs: Optional[List[str]] = 
     if manifest.get("version") != BUNDLE_VERSION:
         raise ShareError(f"the bundle is format {manifest.get('version')}, this Hammer reads {BUNDLE_VERSION}; "
                          f"update Hammer.")
-    work_dir = os.path.normpath(os.path.abspath(into))
+    work_dir = os.path.realpath(into)
     state_path = os.path.join(work_dir, STATE_FILE)
     previous: Dict[str, Any] = {}
     if os.path.isfile(state_path):
@@ -447,13 +466,24 @@ def pull(owner: str, design: str, into: str, env_configs: Optional[List[str]] = 
         raise ShareError(f"{work_dir} is not empty and was not made by a pull; pull into a new directory, or "
                          f"pass --force to write into it anyway.")
     obj_rel = manifest.get("obj_dir_rel")
-    obj_dir = os.path.join(work_dir, *(obj_rel or f"build/{design}").split("/"))
+    if obj_rel is not None and (not isinstance(obj_rel, str) or os.path.isabs(obj_rel)
+                                or ".." in obj_rel.split("/")):
+        raise ShareError(f"the bundle puts its build dir at {obj_rel!r}, which is outside {work_dir}; refusing the "
+                         f"bundle.")
+    obj_dir = os.path.normpath(os.path.join(work_dir, *(obj_rel or f"build/{design}").split("/")))
+    root, real_obj = os.path.realpath(work_dir), os.path.realpath(obj_dir)
+    if not _inside(root, real_obj):
+        raise ShareError(f"the bundle's build dir {obj_dir} leads to {real_obj}, which is outside {work_dir}; "
+                         f"refusing the bundle.")
     os.makedirs(obj_dir, exist_ok=True)
     written = unpack(rec["data"], manifest, work_dir, obj_dir)
-    kept = set(written)
+    kept = {_real_entry(os.path.normpath(os.path.join(work_dir, w))) for w in written}
     for old in previous.get("files", []):
-        if old not in kept:
-            path = old if os.path.isabs(old) else os.path.join(work_dir, old)
+        if not isinstance(old, str):
+            continue
+        path = os.path.normpath(os.path.join(work_dir, old))
+        real = _real_entry(path)
+        if path != work_dir and real not in kept and _inside(root, os.path.dirname(real)):
             with contextlib.suppress(FileNotFoundError):
                 os.remove(path)
     missing = [p for p in manifest.get("external", []) if not os.path.exists(p)]
