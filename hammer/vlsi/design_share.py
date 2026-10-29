@@ -137,10 +137,19 @@ def _walk(directory: str, prune: Callable[[str], bool]) -> Iterator[str]:
 # --- building a bundle ---------------------------------------------------------------------------------
 
 class Bundle:
-    def __init__(self, manifest: Dict[str, Any], data: bytes, bundle_sha: str) -> None:
+    def __init__(self, manifest: Dict[str, Any], data: Optional[bytes], bundle_sha: str,
+                 files: Optional[Dict[str, str]] = None) -> None:
         self.manifest = manifest
-        self.data = data
+        self._data = data
+        self._files = files or {}
         self.bundle_sha = bundle_sha
+
+    @property
+    def data(self) -> bytes:
+        """The packed files, packed on first use so a bundle that turns out unchanged is never packed."""
+        if self._data is None:
+            self._data = _pack(self._files)
+        return self._data
 
 
 def _sha256(path: str) -> str:
@@ -250,7 +259,7 @@ def build_bundle(design: str, work_dir: str, obj_dir: str, env_configs: Iterable
     }
     bundle_sha = hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest()
     manifest["created_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    return Bundle(manifest, _pack(files), bundle_sha)
+    return Bundle(manifest, None, bundle_sha, files)
 
 
 def _pack(files: Dict[str, str]) -> bytes:
@@ -314,8 +323,13 @@ def bundle_from_dag(dag_file: str, owner: Optional[str] = None) -> Bundle:
 def bundle_from_driver(driver: Any, owner: Optional[str] = None) -> Bundle:
     """Bundle the design a running action builds: the DAG in its build dir if it has one (all its tools
     choices), else the configs this action was given."""
+    from hammer.config import HammerJSONEncoder, combine_configs
     dag_file = os.path.join(driver.obj_dir, "hammer_dag.py")
-    config = json.loads(driver.database.get_database_json())
+    db = driver.database
+    # The tools and runtime layers hold only this stage's tool defaults and settings, so every stage scans what
+    # studio share scans.
+    config = json.loads(json.dumps(combine_configs([{}] + db.builtins + db.core + db.technology + db.environment
+                                                   + db.project), cls=HammerJSONEncoder))
     design = os.environ.get("HAMMER_AIRFLOW_DESIGN") or os.path.basename(str(driver.obj_dir).rstrip("/"))
     if os.path.isfile(dag_file):
         dag = read_dag(dag_file)
@@ -334,11 +348,11 @@ def _driver_work_dir(driver: Any) -> str:
 
 
 def republish_if_shared(driver: Any) -> Optional[str]:
-    """After a successful syn: if this design is shared, publish its bundle again when its files changed, so
-    partners who pull get what this run built. Only the checkout the stored bundle was published from (by
-    real path) republishes it; a bundle that records no source is never republished from a pulled copy.
-    Returns a one-line note, or None when nothing was done. Never raises; sharing must not fail a stage that
-    succeeded."""
+    """After syn, par, drc or lvs commits: if this design is shared, publish its bundle again when its files
+    changed, so partners who pull get what this run built. Only the checkout the stored bundle was published
+    from (by real path) republishes it; a bundle that records no source is never republished from a pulled
+    copy. Returns a one-line note, or None when nothing was done. Never raises; sharing must not fail a stage
+    that succeeded."""
     from hammer.vlsi import pd_cache, pd_store
     try:
         if not pd_cache.is_cache_enabled(driver):
@@ -349,8 +363,14 @@ def republish_if_shared(driver: Any) -> Optional[str]:
     except Exception:
         return None  # no database, or no sharing tables yet: nothing is shared that could need refreshing
     try:
+        # Without a DAG, a par, drc or lvs action's only project config is its stage input, not the design.
+        if not os.path.isfile(os.path.join(driver.obj_dir, "hammer_dag.py")) and any(
+                _relative(p, driver.obj_dir) is not None
+                for p in getattr(getattr(driver, "options", None), "project_configs", None) or []):
+            return None
         work_dir = _driver_work_dir(driver)
-        source = ((pd_store.stored_design_bundle(design) or {}).get("source") or {}).get("work_dir")
+        stored = pd_store.stored_design_bundle(design) or {}
+        source = (stored.get("source") or {}).get("work_dir")
         if source:
             if os.path.realpath(source) != os.path.realpath(work_dir):
                 return (f"left the shared {design} bundle as it is, since it was published from {source}, not "
@@ -358,7 +378,9 @@ def republish_if_shared(driver: Any) -> Optional[str]:
                         f"checkout instead")
         elif os.path.isfile(os.path.join(os.path.realpath(work_dir), STATE_FILE)):
             return None
-        bundle = bundle_from_driver(driver)
+        bundle = bundle_from_driver(driver, owner=pd_store.current_db_user())
+        if bundle.bundle_sha == stored.get("bundle_sha"):
+            return None
         if pd_store.publish_design_bundle(design, bundle.manifest, bundle.data, bundle.bundle_sha):
             return f"published the updated {design} bundle for its partners ({len(bundle.data)} bytes)"
         return None

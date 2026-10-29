@@ -44,7 +44,9 @@ class FakeDB:
 
     def stored(self, design):
         current = self.bundles.get((self.user, design))
-        return {"source": current["manifest"].get("source")} if current is not None else None
+        if current is None:
+            return None
+        return {"source": current["manifest"].get("source"), "bundle_sha": current["bundle_sha"]}
 
 
 @pytest.fixture
