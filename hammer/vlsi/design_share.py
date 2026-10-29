@@ -156,6 +156,203 @@ def _sha256(path: str) -> str:
     return fingerprints.sha256_file(path)
 
 
+def _local_modules(root: str, name: str) -> List[Tuple[str, str]]:
+    """The files ``import name`` loads from root, the directory `python <driver>` puts first on sys.path, as
+    (path, package) for each module on the way."""
+    found: List[Tuple[str, str]] = []
+    parts = name.split(".")
+    here = root
+    for i, part in enumerate(parts):
+        init = os.path.join(here, part, "__init__.py")
+        if os.path.isfile(init):
+            found.append((init, ".".join(parts[:i + 1])))
+        elif os.path.isfile(os.path.join(here, part + ".py")):
+            found.append((os.path.join(here, part + ".py"), ".".join(parts[:i])))
+            break
+        elif not os.path.isdir(os.path.join(here, part)):
+            break
+        here = os.path.join(here, part)
+    return found
+
+
+def _local_module(root: str, name: str) -> Optional[Tuple[Optional[str], str]]:
+    """(file, package) of the module ``import name`` loads from root, with no file for a directory without
+    __init__.py, or None when root holds no such module."""
+    base = os.path.join(root, *name.split("."))
+    if os.path.isfile(os.path.join(base, "__init__.py")):
+        return os.path.join(base, "__init__.py"), name
+    if os.path.isfile(base + ".py"):
+        return base + ".py", name.rpartition(".")[0]
+    return (None, name) if os.path.isdir(base) else None
+
+
+_PATH_CALLS: Dict[str, Callable[..., Any]] = {
+    "os.path.join": os.path.join, "os.path.dirname": os.path.dirname, "os.path.abspath": os.path.abspath,
+    "os.path.realpath": os.path.realpath, "os.path.normpath": os.path.normpath, "pathlib.Path": Path, "str": str}
+
+
+class _Ref:
+    """A module or function a hook module names: a local module with its (file, package), else a dotted name."""
+
+    def __init__(self, dotted: str, local: Optional[Tuple[Optional[str], str]] = None) -> None:
+        self.dotted = dotted
+        self.local = local
+
+
+class _PathValues:
+    """The values of hook modules' path expressions, worked out from their source without running it."""
+
+    def __init__(self, root: str, carried: Callable[[str], bool]) -> None:
+        from hammer.vlsi import code_fingerprints
+        self.root = root
+        self.carried = carried
+        self.trees: Dict[str, Optional[ast.Module]] = {}
+        self.envs: Dict[str, Dict[str, Any]] = {}
+        self._module = code_fingerprints._HookModule
+
+    def tree(self, real: str) -> Optional[ast.Module]:
+        if real not in self.trees:
+            self.trees[real] = self._module(real, None).tree
+        return self.trees[real]
+
+    def ref(self, dotted: str) -> _Ref:
+        local = None if dotted.split(".")[0] in ("os", "pathlib") else _local_module(self.root, dotted)
+        if local is not None and local[0] is not None and not self.carried(local[0]):
+            local = None
+        return _Ref(dotted, local)
+
+    def member(self, base: Any, attr: str) -> Any:
+        if isinstance(base, Path):
+            return base.parent if attr == "parent" else None
+        if not isinstance(base, _Ref):
+            return None
+        if base.local is None:
+            return _Ref(f"{base.dotted}.{attr}")
+        sub = self.ref(f"{base.dotted}.{attr}")
+        if sub.local is not None:
+            return sub
+        return self.env(*base.local).get(attr) if base.local[0] else None
+
+    def env(self, path: str, package: str) -> Dict[str, Any]:
+        """The module's top-level imports and assignments, with __file__ the path it is loaded from."""
+        key = os.path.realpath(path)
+        if key in self.envs:
+            return self.envs[key]
+        env = self.envs[key] = {"__file__": path}
+        tree = self.tree(key)
+        for st in (tree.body if tree is not None else []):
+            if isinstance(st, ast.Import):
+                for a in st.names:
+                    env[a.asname or a.name.split(".")[0]] = self.ref(a.name if a.asname else a.name.split(".")[0])
+            elif isinstance(st, ast.ImportFrom):
+                base = package.split(".") if package and st.level else []
+                if st.level > 1:
+                    base = base[:-(st.level - 1)]
+                dotted = ".".join(base + ([st.module] if st.module else []))
+                target = self.ref(dotted) if dotted else None
+                for a in st.names:
+                    if a.name != "*":
+                        env[a.asname or a.name] = self.member(target, a.name)
+                    elif target is not None and target.local is not None and target.local[0]:
+                        env.update((k, v) for k, v in self.env(*target.local).items() if not k.startswith("_"))
+            elif isinstance(st, (ast.Assign, ast.AnnAssign)) and st.value is not None:
+                try:
+                    value = self.value(st.value, env)
+                except Exception:
+                    value = None
+                for t in (st.targets if isinstance(st, ast.Assign) else [st.target]):
+                    if isinstance(t, ast.Name):
+                        env[t.id] = value
+        return env
+
+    def value(self, node: ast.AST, env: Dict[str, Any], partial: bool = False) -> Any:
+        """node's str, Path or _Ref value, or None; with partial, an f-string's unknown parts are NUL."""
+        if isinstance(node, ast.Constant):
+            return node.value if isinstance(node.value, str) else None
+        if isinstance(node, ast.Name):
+            return env.get(node.id, _Ref("str") if node.id == "str" else None)
+        if isinstance(node, ast.Attribute):
+            return self.member(self.value(node.value, env), node.attr)
+        if isinstance(node, ast.JoinedStr):
+            parts = []
+            for v in node.values:
+                x = None
+                if isinstance(v, ast.Constant):
+                    x = v.value
+                elif isinstance(v, ast.FormattedValue) and v.format_spec is None and v.conversion in (-1, 115):
+                    x = self.value(v.value, env)
+                if not isinstance(x, (str, Path)):
+                    if not partial:
+                        return None
+                    x = "\0"
+                parts.append(str(x))
+            return "".join(parts)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Div)):
+            left, right = self.value(node.left, env), self.value(node.right, env)
+            if isinstance(node.op, ast.Add):
+                return left + right if isinstance(left, str) and isinstance(right, str) else None
+            if isinstance(left, (str, Path)) and isinstance(right, (str, Path)) and (
+                    isinstance(left, Path) or isinstance(right, Path)):
+                return left / right
+            return None
+        if isinstance(node, ast.Call) and not node.keywords and not any(isinstance(a, ast.Starred) for a in node.args):
+            if isinstance(node.func, ast.Attribute) and node.func.attr in ("resolve", "absolute") and not node.args:
+                base = self.value(node.func.value, env)
+                return getattr(base, node.func.attr)() if isinstance(base, Path) else None
+            func = self.value(node.func, env)
+            call = _PATH_CALLS.get(func.dotted) if isinstance(func, _Ref) and func.local is None else None
+            args = [self.value(a, env) for a in node.args] if call is not None else []
+            if call is not None and all(isinstance(a, (str, Path)) for a in args):
+                return call(*args)
+        return None
+
+
+def _hook_files(root: str, modules: Iterable[str], carried: Callable[[str], bool]) -> Tuple[List[str], List[str]]:
+    """The local modules these modules import, followed from root as `python <driver>` imports them while
+    ``carried`` accepts them, and the files all of them name, by literal or by a path expression of their own
+    top-level values."""
+    from types import SimpleNamespace
+
+    from hammer.vlsi import code_fingerprints
+    values = _PathValues(root, carried)
+    todo = [(os.path.abspath(p), "") for p in modules]
+    seen: Dict[str, None] = {}
+    imported: List[str] = []
+    named: Dict[str, None] = {}
+    while todo:
+        path, package = todo.pop(0)
+        real = os.path.realpath(path)
+        if real in seen:
+            continue
+        seen[real] = None
+        tree = values.tree(real)
+        if tree is None:
+            continue
+        env = values.env(path, package)
+        found = list(env.values())
+        for x in ast.walk(tree):
+            if isinstance(x, (ast.JoinedStr, ast.BinOp, ast.Call)):
+                try:
+                    found.append(values.value(x, env, partial=True))
+                except Exception:
+                    pass
+            if isinstance(x, (ast.JoinedStr, ast.BinOp)):
+                frags = sorted((c for c in ast.walk(x) if isinstance(c, ast.Constant) and isinstance(c.value, str)),
+                               key=lambda c: (getattr(c, "lineno", 0), getattr(c, "col_offset", 0)))
+                found.append("/".join(c.value.strip("/") for c in frags if c.value.strip("/")))
+        strings = list(dict.fromkeys(str(v) for v in found if isinstance(v, (str, Path))))
+        strings += [t.split("\0")[0] for s in strings if re.search(r"[\s\0]", s) for t in s.split()]
+        for p in dict.fromkeys((path, real)):
+            mod = SimpleNamespace(path=p, live=None)
+            named.update(dict.fromkeys(sorted(code_fingerprints._literal_paths(mod, [tree], strings))))
+        for name in sorted(code_fingerprints._tree_imports(tree, package)):
+            for found_path, pkg in _local_modules(root, name):
+                if found_path not in imported and carried(found_path):
+                    imported.append(found_path)
+                    todo.append((found_path, pkg))
+    return imported, sorted(named)
+
+
 def build_bundle(design: str, work_dir: str, obj_dir: str, env_configs: Iterable[str],
                  proj_confs_by_tools: Dict[str, List[str]], default_tools: str, hammer_exec: Optional[str],
                  config: Dict[str, Any], owner: Optional[str] = None) -> Bundle:
@@ -227,11 +424,20 @@ def build_bundle(design: str, work_dir: str, obj_dir: str, env_configs: Iterable
             rewrite.add(driver_arc)
             # hooks split out of the driver into modules beside it
             here = os.path.dirname(os.path.abspath(hammer_exec))
+            modules = [hammer_exec]
             for name in sorted(os.listdir(here)):
                 if name.endswith(".py") and os.path.isfile(os.path.join(here, name)):
                     arc = add_file(os.path.join(here, name))
                     if arc is not None:
                         rewrite.add(arc)
+                        modules.append(os.path.join(here, name))
+            imported, named = _hook_files(here, modules, lambda p: arcname(p) is not None)
+            for path in imported:
+                arc = add_file(path)
+                if arc is not None:
+                    rewrite.add(arc)
+            for path in named:
+                add_file(path)
     suffixes = fingerprints.collateral_suffixes() + fingerprints.RTL_INCLUDE_SUFFIXES
     for path in dict.fromkeys(_candidate_paths(config, work_dir, suffixes)):
         if os.path.exists(path):
