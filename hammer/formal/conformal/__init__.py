@@ -334,10 +334,20 @@ class Conformal(HammerFormalTool, CadenceTool):
             else:
                 append(f"analyze_eco {self.eco_patch_path} -replace")
                 append("set_system_mode setup")
-                append("apply_patch -auto -golden")
+                append("apply_patch -auto -golden -keephierarchy")
 
-        # The patched netlist, and the patch as Innovus netlist edits
+        # analyze_eco writes the patch in generic gates; Genus maps it onto library
+        # cells, which is what place-and-route can implement
+        avoid = " ".join(self.get_dont_use_list())
+        append(f"optimize_patch -workdir {self.eco_genus_dir} "
+               f"-library {{{' '.join(self.eco_liberty_files())}}} -synexec {self.eco_genus_bin} -relative2cwd "
+               "-instancenaming ECO_inst_%d -netnaming ECO_net_%d -sequentialnaming ECO_reg_%s"
+               + (f" -avoid {avoid}" if avoid else ""))
+
+        # The patched netlist, and the patch as Innovus netlist edits (the Stylus
+        # script is what the eco_par stage applies to the par database)
         append(f"report_eco_changes -innovus -file {self.eco_innovus_script_path} -replace")
+        append(f"report_eco_changes -stylus -file {self.eco_stylus_script_path} -replace")
         append(f"write_eco_design -newfile {self.eco_netlist_path} -replace -report 07_ECOprelogics.rpt")
 
         # Verify what was written: read it back and compare it flat against the reference
@@ -391,6 +401,8 @@ class Conformal(HammerFormalTool, CadenceTool):
         append("}")
         append("set_system_mode setup")
         append(f"set_root_module {self.top_module} -both")
+        # the hierarchical compare's black boxes would hide the patches from optimize_patch
+        append("delete_black_box -all -hier -both")
         append(f"set eco_patch [open {self.eco_patch_path} w]")
         append("foreach pair $eco_modules {")
         append("    set golden [lindex $pair 0]")
@@ -448,7 +460,8 @@ class Conformal(HammerFormalTool, CadenceTool):
             return False
         if self.eco_compare_result("01_pre_eco_verification.rpt") == "PASS":
             self.logger.warning("The implemented design already matched the reference, so the ECO patch is empty.")
-        for path in (self.eco_patch_path, self.eco_netlist_path, self.eco_innovus_script_path):
+        for path in (self.eco_patch_path, self.eco_netlist_path, self.eco_innovus_script_path,
+                     self.eco_stylus_script_path):
             if not os.path.isfile(path):
                 self.logger.error(f"ECO output {path} not found")
                 return False
@@ -460,6 +473,7 @@ class Conformal(HammerFormalTool, CadenceTool):
             outputs["formal.outputs.eco_netlist"] = self.eco_netlist_path
             outputs["formal.outputs.eco_patch"] = self.eco_patch_path
             outputs["formal.outputs.eco_innovus_script"] = self.eco_innovus_script_path
+            outputs["formal.outputs.eco_stylus_script"] = self.eco_stylus_script_path
         return outputs
 
     @property
@@ -473,6 +487,28 @@ class Conformal(HammerFormalTool, CadenceTool):
     @property
     def eco_innovus_script_path(self) -> str:
         return os.path.join(self.run_dir, "eco.invs")
+
+    @property
+    def eco_stylus_script_path(self) -> str:
+        return os.path.join(self.run_dir, "eco_stylus.tcl")
+
+    @property
+    def eco_genus_dir(self) -> str:
+        return os.path.join(self.run_dir, "eco_genus")
+
+    @property
+    def eco_genus_bin(self) -> str:
+        """ formal.conformal.eco_genus_bin, else the DDI Genus of synthesis.genus.version, else genus on the PATH """
+        configured = self.get_setting("formal.conformal.eco_genus_bin", nullvalue="")
+        if configured:
+            return str(configured)
+        try:
+            version = self.get_setting("synthesis.genus.version", nullvalue="")
+        except KeyError:
+            version = ""
+        if not version:
+            return "genus"
+        return f"{self.get_setting('cadence.cadence_home')}/DDI/DDI{version}/bin/genus"
 
     @property
     def ran_patch_eco_designs(self) -> bool:

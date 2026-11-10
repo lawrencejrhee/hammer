@@ -4,18 +4,18 @@ A bug found after `par` normally means rerunning synthesis and place and route
 from scratch. The `eco` stage avoids that. It takes the placed-and-routed
 netlist, compares it with a netlist synthesized from the corrected RTL, and
 has Cadence Conformal generate a patch that makes the implemented design match
-the fix. It then applies the patch, proves the patched netlist equivalent to
-the corrected one, and writes the patched netlist plus an Innovus script with
-the same edits.
+the fix. It then applies the patch, maps it onto library cells, proves the
+patched netlist equivalent to the corrected one, and writes the patched netlist
+plus Innovus scripts with the same edits. The `eco_par` stage then places and
+routes the patch incrementally on `par`'s database.
 
 ```text
 par ─┬→ par_to_sim / par_to_power / par_to_formal / par_to_timing / par_to_drc / par_to_lvs
-     └→ par_to_eco → eco
+     └→ par_to_eco → eco → eco_to_par → eco_par
 ```
 
-The stage closes the logical ECO loop only. Placing and routing the patch
-(incremental `par`) and re-running signoff on the result are not part of it
-yet; see [What is not covered yet](#what-is-not-covered-yet).
+Re-running signoff on the patched layout is not part of it yet; see [What is
+not covered yet](#what-is-not-covered-yet).
 
 ## Running it
 
@@ -101,9 +101,22 @@ The `eco` stage is the `formal` action run in its own rundir
 | `03_eco_check.rpt`, `04_eco_hierarchy_noneq.rpt` | `flat_localized` only: ECO setup checks and the modules that need patching |
 | `patch.v`, `ecopin.do`, `hier.eco.do` | the patch, the ECO pins it needs, the hierarchical compare dofile. `hierarchical` also keeps one `patch_<module>.v` per patched module; `patch.v` collects them |
 | `golden_flat.v` | `flat_global` only: the implemented netlist flattened, which the patch is applied to |
+| `eco_genus/` | `optimize_patch`'s Genus run: `cfm_eco_genus.tcl`, `genus.log` and the mapped patches |
 | `05_post_eco_verification.rpt`, `06_post_eco_compare_data.rpt` | the written `<top>.eco.v`, read back and compared flat against the reference (must pass) |
-| `<top>.eco.v`, `07_ECOprelogics.rpt` | the patched netlist and its report |
-| `eco.invs` | the patch as Innovus netlist-edit commands |
+| `<top>.eco.v`, `07_ECOprelogics.rpt` | the patched netlist, in library cells, and its report |
+| `eco.invs` | the mapped patch as Innovus netlist-edit commands (legacy syntax) |
+| `eco_stylus.tcl` | the same edits in Stylus Common UI syntax (`create_inst`, `connect`); what `eco_par` applies |
+
+`analyze_eco` writes the patch in generic gates (`and`, `not`, muxes), which no
+layout tool can place. After applying it, the stage runs Conformal's
+`optimize_patch`, which has Genus map the patch onto the same setup-corner
+Liberty, leaving out the technology's dont-use cells (`-avoid`). The Genus is
+`formal.conformal.eco_genus_bin`, by default the DDI Genus of
+`synthesis.genus.version`, the one synthesis runs. On Test2 the 17 generic gates
+became 9 `sky130_scl_9T` cells (`AOI21X1`, `OAI22X1`, `CLKMX2X2`, ...); the
+final compare checks the mapped netlist. `optimize_patch` needs the patches
+applied with `-keephierarchy` and, after a hierarchical compare, the compare's
+black boxes deleted (`delete_black_box -all -hier -both`) first.
 
 The stage fails unless `05_post_eco_verification.rpt` reports `PASS`.
 Conformal's exit status cannot decide this: it flags the non-equivalent points
@@ -116,8 +129,8 @@ before the patch, the stage passes with a warning that there was nothing to
 fix.
 
 `eco-rundir/formal-output.json` exports the artifacts for later stages:
-`formal.outputs.eco_netlist`, `formal.outputs.eco_patch` and
-`formal.outputs.eco_innovus_script`.
+`formal.outputs.eco_netlist`, `formal.outputs.eco_patch`,
+`formal.outputs.eco_innovus_script` and `formal.outputs.eco_stylus_script`.
 
 The dofile has the two steps of the plugin's `lec` check, with a Conformal
 checkpoint after each: `setup_eco_designs` reads the designs, and
@@ -140,7 +153,7 @@ the reference.
 |---|---|---|---|
 | `hierarchical` | comparing module by module (`write_hier_compare_dofile`, `run_hier_compare`) | into each non-equivalent module, generated from that module's own compare | per module: `set_root_module`, `compare`, `analyze_eco patch_<module>.v`; then `apply_patch <module> <module>_eco -keephierarchy` |
 | `flat_localized` | one flat compare (`set_eco_option -flat`, `analyze_hier_compare -eco_aware`) | into each module the failing logic sits in | `compare_eco_hierarchy`, `analyze_eco -hierarchical`, `apply_patch -auto -keephierarchy`. Cadence's "flattened ECO flow" |
-| `flat_global` | one flat compare of the flattened netlists | one patch at the top; the patched netlist comes out flat | `flatten`, `write_design golden_flat.v`, read back; `analyze_eco`, `apply_patch -auto` |
+| `flat_global` | one flat compare of the flattened netlists | one patch at the top; the patched netlist comes out flat | `flatten`, `write_design golden_flat.v`, read back; `analyze_eco`, `apply_patch -auto -keephierarchy` |
 
 `flat_global` reads a flattened copy of the implementation (`golden_flat.v`)
 because Conformal applies a patch only to the netlist structure it read
@@ -150,7 +163,8 @@ a top-level patch tries to re-implement most of the design (Conformal warns
 "Please use hierarchical method").
 
 Measured on `gatelevelgurus_Test2` (bugs in `Branch_comp` and `Imm_gen`), all
-three through the plugin, Conformal 26.1:
+three through the plugin, Conformal 26.1, before `optimize_patch` was added
+(so the patch is `analyze_eco`'s, unmapped):
 
 | | `hierarchical` | `flat_localized` | `flat_global` |
 |---|---:|---:|---:|
@@ -161,8 +175,71 @@ three through the plugin, Conformal 26.1:
 | Final check | PASS, 2532 points | PASS, 2532 points | PASS, 2530 points |
 
 A flat patched netlist no longer matches the module structure of `par`'s
-Innovus database, which matters once the patch is placed and routed
-incrementally (not covered yet).
+Innovus database, so `eco_par` cannot apply a `flat_global` patch: its edits
+name nets of the flattened netlist (on Test2, `cpu/Immgen_main/n_11`), and
+Innovus stops at the first one (`IMPTCM-162`). Use `hierarchical` or
+`flat_localized` when the patch is to be placed and routed.
+
+## Placing and routing the patch (`eco_par`)
+
+`eco_par` is an incremental Innovus run on `par`'s database:
+
+| Flow | Command |
+|---|---|
+| Make (`e2e/`) | `make eco-par` (after `eco`); `make redo-eco-par` reruns just it |
+| DAG | tick **ECO Place and Route**, or `sledgehammer run eco_par`; asking for it pulls in `eco`, and `syn` and `par` skip |
+
+A `hammer.d` or DAG generated before this stage has no `eco_par`; regenerate
+it (`studio make-dag --design <design>`, or `sledgehammer buildfile`).
+
+`eco_to_par` (`HammerDriver.eco_output_to_par_input`) sets
+`par.inputs.eco_script` to `formal.outputs.eco_stylus_script`. With that key
+set, the Innovus plugin replaces its full flow with these steps, in
+`eco-par-rundir/`:
+
+| Step | Innovus |
+|---|---|
+| `eco_restore_design` | `read_db` of `par`'s `<top>_FINAL`, found beside `par.outputs.output_netlist` |
+| `eco_apply_patch` | `source eco_stylus.tcl`; the new cells come in unplaced, already on VDD/VSS through the database's global-net rules |
+| `eco_place` | `delete_filler` (the technology's decap and filler cells), `place_eco`, `check_place`, then the same `add_fillers` as `par` |
+| `eco_route` | `route_eco`: routes the new and changed nets, keeps the rest |
+| `eco_opt_design` | `opt_design -post_route -setup -hold`, as `par` ends on Innovus 25.1 |
+| `write_regs`, `write_design` | `par`'s own: `<top>_FINAL`, the netlists, DEF, GDS, SDF and SPEF |
+
+`eco-par-rundir/par-output.json` exports the usual `par.outputs.*`, pointing at
+the patched layout. A failed restore or patch exits Innovus (instead of leaving
+it at its prompt), and the run fails when its netlist is older than the script,
+so a rerun that stopped early never passes on an earlier run's outputs.
+
+`eco_par` keeps `par` cached. The `eco-par` action runs the par tool in its own
+rundir without the dependency check, PD cache or substep resume, so it never
+writes `par`'s master database. `par.inputs.eco_script` has no default: a new
+`par.*` default would reach every `par` config and rerun `par`. The run applies
+the Innovus plugin's own hooks only, not the technology's or the driver's
+`par` hooks, which target full-flow steps (`init_design`, `power_straps`) that
+the ECO run does not have; the restored database already carries their
+settings. It emits Tcl only (`par.innovus.use_python: false`, the default).
+
+Measured with the default `hierarchical` method (Test2 also with
+`flat_localized`), Innovus 25.1, `sky130_scl`:
+
+| | Test1 (`A ^ B` → `A \| B`) | Test2 | Test2, `flat_localized` |
+|---|---:|---:|---:|
+| `eco` (with `optimize_patch`) | 295 s | 331 s | 212 s |
+| Mapped patch | 234 cells | 9 cells | 9 cells |
+| `eco_par` | 24 min | 23 min | 23 min |
+| Original cells untouched (DEF placement and cell) | 98.45% | 99.06% | 99.14% |
+| Setup WNS: `par` → after `eco_par` | +0.134 → +0.075 ns | +0.165 → +0.147 ns | |
+| Hold WNS: `par` → after `eco_par` | −0.026 → −0.117 ns (one I/O path, violating in `par` already) | → +0.008 ns | |
+| `check_place` | no violations | no violations | no violations |
+| Final netlist vs the reference (Conformal) | PASS, 2532 points | PASS, 2532 points | PASS, 2532 points |
+
+Against a full `syn` + `par` of about 71–73 minutes. Without `eco_opt_design`,
+Test2's setup WNS after `route_eco` was −1.446 ns (the patch sits on a
+critical path and Genus mapped it without timing); `opt_design` resized or
+moved 182 cells to recover it. `check_drc` counts stay at `par`'s own level
+(Test2: 1618 before, 1621 after; the same macro-blockage and power-stripe
+shorts, none on an ECO net).
 
 ## Where this came from
 
@@ -201,17 +278,14 @@ patched netlist against the changed RTL passes.
 
 ## What is not covered yet
 
-- **Incremental place and route.** `eco.invs` (or `<top>.eco.v`) has to be
-  applied to the routed database: restore `par`'s database, source the
-  script, then `ecoPlace` / `ecoRoute`. An `eco_to_par` bridge and a
-  `par_eco` stage would consume `formal.outputs.eco_innovus_script`. The
-  project's archived `general_eco` flow has an Innovus script for this
-  (`baseline_pnr_inv_R2_incremental.tcl`).
-- **Signoff on the patched layout.** Timing, DRC, LVS and a final RTL-vs-layout
-  equivalence check would hang off that `par_eco` stage the way they hang off
-  `par` today.
-- **Physical-aware patch optimization.** Conformal's `optimize_patch` (GXL),
-  which maps the patch with the SDC, LEF and `par`'s DEF, as the archived flow
-  did. The flow here maps the patch onto the setup-corner Liberty only.
-- **Hierarchical designs.** The DAG gets an `eco` node per module, but the flow
-  has only been run on flat designs.
+- **Signoff on the patched layout.** Timing, DRC, LVS and a final
+  equivalence check of `eco-par-rundir/<top>.sim.v` would hang off `eco_par`
+  the way they hang off `par` today. The equivalence results above were run by
+  hand.
+- **Physical-aware patch mapping.** `optimize_patch` maps with the Liberty
+  only; with the SDC, LEF and `par`'s DEF it can map for timing and placement
+  (`-premaskphysical`), as the archived flow did. Here `eco_opt_design`
+  recovers the timing afterwards.
+- **`flat_global` patches in `eco_par`** (see above).
+- **Hierarchical designs.** The DAG gets an `eco` and an `eco_par` node per
+  module, but the flow has only been run on flat designs.

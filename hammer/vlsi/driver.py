@@ -1215,6 +1215,32 @@ class HammerDriver:
             # KeyError means that the given dictionary is missing output keys.
             return None
 
+    @staticmethod
+    def eco_output_to_par_input(output_dict: dict) -> Optional[dict]:
+        """
+        Generate the appropriate inputs for incremental place and route of a
+        functional ECO from the outputs of an eco run: the par tool restores the
+        database of the par run the ECO patched (par.outputs.*, carried through
+        the eco run) and applies par.inputs.eco_script, the mapped patch as
+        netlist edits. The keys are set only here, never in a par run's config,
+        so par itself stays cached.
+        Does not merge the results with any project dictionaries.
+        :param output_dict: Dict containing formal.outputs.eco_* and par.outputs.*
+        :return: par.inputs.* settings generated from output_dict,
+                 or None if output_dict was invalid
+        """
+        try:
+            result = {
+                "par.inputs.eco_script": output_dict["formal.outputs.eco_stylus_script"],
+                "par.inputs.input_files": deeplist([output_dict["formal.outputs.eco_netlist"]]),
+                "par.inputs.top_module": output_dict["par.inputs.top_module"],
+                "vlsi.builtins.is_complete": False
+            }  # type: Dict[str, Any]
+            return result
+        except KeyError:
+            # KeyError means that the given dictionary is missing output keys.
+            return None
+
     def run_par(self, hook_actions: Optional[List[HammerToolHookAction]] = None, force_override: bool = False) -> Tuple[
         bool, dict]:
         """

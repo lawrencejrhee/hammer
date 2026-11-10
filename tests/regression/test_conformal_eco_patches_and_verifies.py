@@ -132,7 +132,11 @@ class TestConformalEco:
     def _write_and_verify(formal) -> list:
         rundir = str(formal.run_dir)
         return [
+            # Genus maps the patch onto the setup corner's library cells
+            f"optimize_patch -workdir {rundir}/eco_genus -library {{{formal.tech_dir}/slow.lib {formal.tech_dir}/pads.lib}} "
+            "-synexec genus -relative2cwd -instancenaming ECO_inst_%d -netnaming ECO_net_%d -sequentialnaming ECO_reg_%s",
             f"report_eco_changes -innovus -file {rundir}/eco.invs -replace",
+            f"report_eco_changes -stylus -file {rundir}/eco_stylus.tcl -replace",
             f"write_eco_design -newfile {rundir}/dummy.eco.v -replace -report 07_ECOprelogics.rpt",
             # what was written is read back and compared flat against the reference from scratch
             "set_system_mode setup",
@@ -177,6 +181,7 @@ class TestConformalEco:
             "    set_root_module $revised -revised",
             "    analyze_eco patch_$golden.v -replace",
             "set_root_module dummy -both",
+            "delete_black_box -all -hier -both",
             "    apply_patch $golden ${golden}_eco -golden -keephierarchy",
         ])
         assert not any(c.startswith("flatten") for c in commands)
@@ -221,9 +226,10 @@ class TestConformalEco:
             "redirect 01_pre_eco_verification.rpt {report_verification}",
             f"analyze_eco {rundir}/patch.v -replace",
             "set_system_mode setup",
-            "apply_patch -auto -golden",
+            # optimize_patch maps only a patch applied with -keephierarchy
+            "apply_patch -auto -golden -keephierarchy",
         ])
-        assert not any("-hierarchical" in c or "-keephierarchy" in c for c in commands)
+        assert not any("-hierarchical" in c for c in commands)
 
     @pytest.mark.parametrize("formal", ["flat"], indirect=True)
     def test_an_unknown_method_is_an_error(self, formal, monkeypatch) -> None:
@@ -240,6 +246,26 @@ class TestConformalEco:
         assert outputs["formal.outputs.eco_netlist"] == f"{rundir}/dummy.eco.v"
         assert outputs["formal.outputs.eco_patch"] == f"{rundir}/patch.v"
         assert outputs["formal.outputs.eco_innovus_script"] == f"{rundir}/eco.invs"
+        assert outputs["formal.outputs.eco_stylus_script"] == f"{rundir}/eco_stylus.tcl"
+
+    def test_genus_maps_the_patch_with_the_genus_synthesis_runs(self, formal) -> None:
+        formal.driver.database.set_setting("cadence.cadence_home", "/cad")
+        formal.driver.database.set_setting("synthesis.genus.version", "231_ISR2")
+        formal.driver.database.set_setting("vlsi.inputs.dont_use_mode", "manual")
+        formal.driver.database.set_setting("vlsi.inputs.dont_use_list", ["*sdf*", "probe_*"])
+        ok, _ = formal()
+        assert ok
+        optimize = next(c for c in _commands(formal.run_dir) if c.startswith("optimize_patch"))
+        assert "-synexec /cad/DDI/DDI231_ISR2/bin/genus " in optimize
+        # the technology's dont-use cells stay out of the patch, as out of synthesis
+        assert optimize.endswith(" -avoid *sdf* probe_*")
+
+    def test_formal_conformal_eco_genus_bin_overrides_the_genus(self, formal) -> None:
+        formal.driver.database.set_setting("synthesis.genus.version", "231_ISR2")
+        formal.driver.database.set_setting("formal.conformal.eco_genus_bin", "/my/genus")
+        ok, _ = formal()
+        assert ok
+        assert any(c.startswith("optimize_patch") and "-synexec /my/genus " in c for c in _commands(formal.run_dir))
 
     def test_an_eco_that_does_not_verify_fails(self, formal, monkeypatch) -> None:
         monkeypatch.setenv("FAKE_LEC_POST_ECO", "FAIL:NONEQ")

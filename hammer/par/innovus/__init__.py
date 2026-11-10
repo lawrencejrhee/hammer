@@ -753,6 +753,15 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
         return outputs
 
     def fill_outputs(self) -> bool:
+        if self.eco_script is not None and self.ran_write_design:
+            # innovus's exit status goes unchecked, and an ECO run that stopped early
+            # (exit 2) leaves no outputs newer than the script it ran
+            script = os.path.join(self.run_dir, "par.tcl")
+            netlist = self.output_sim_netlist_filename
+            if not os.path.isfile(netlist) or os.path.getmtime(netlist) < os.path.getmtime(script):
+                self.logger.error(f"ECO place and route stopped before writing its outputs; see {self.run_dir}/innovus.log")
+                return False
+
         if self.ran_write_ilm:
             # Check that the ILMs got written.
 
@@ -961,6 +970,16 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
 
     @property
     def steps(self) -> List[HammerToolStep]:
+        if self.eco_script is not None:
+            return self.make_steps_from_methods([
+                self.eco_restore_design,
+                self.eco_apply_patch,
+                self.eco_place,
+                self.eco_route,
+                self.eco_opt_design,
+                self.write_regs,
+                self.write_design
+            ])
         steps = [
             self.init_design,
             self.floorplan_design,
@@ -1769,6 +1788,80 @@ class Innovus(HammerPlaceAndRouteTool, CadenceTool):
 
     def assemble_design(self) -> bool:
         # TODO: implement the assemble_design step.
+        return True
+
+    # Incremental place and route of a functional ECO (the eco_par stage, set up
+    # by eco-to-par): restore the database of the par run the ECO patched, apply
+    # the patch Conformal mapped onto library cells (par.inputs.eco_script, its
+    # report_eco_changes -stylus script), and place, route and optimize what
+    # changed. place_eco and route_eco leave placed cells and existing routes
+    # alone; the post-route optimization then resizes or buffers only what it
+    # must to meet timing. Tcl only, and without the technology's par hooks,
+    # which target full-flow steps (the restored database already has their
+    # settings and power connections).
+
+    @property
+    def eco_script(self) -> Optional[str]:
+        """ par.inputs.eco_script; set (by eco-to-par) only for incremental place and route of an ECO """
+        try:
+            return self.get_setting("par.inputs.eco_script")
+        except KeyError:
+            return None
+
+    @property
+    def eco_base_db(self) -> str:
+        """ The database write_design saved in the patched par run, beside its netlist """
+        par_dir = os.path.dirname(self.get_setting("par.outputs.output_netlist"))
+        return os.path.join(par_dir, self.output_innovus_lib_name)
+
+    def eco_restore_design(self) -> bool:
+        """ Restore the database of the par run the ECO patched """
+        if self.use_python:
+            self.logger.error("ECO place and route runs Innovus in Tcl; set par.innovus.use_python to false")
+            return False
+        try:
+            db = self.eco_base_db
+        except KeyError:
+            self.logger.error("No par.outputs.output_netlist: eco_par needs the outputs of the par run the ECO patched")
+            return False
+        if not os.path.isdir(db):
+            self.logger.error(f"Database {db} of the patched par run not found")
+            return False
+        # on an error innovus drops to an interactive prompt instead of exiting
+        self.append(f"if {{[catch {{read_db {db}}} err]}} {{puts $err; puts {{ERROR: failed to read {db}}}; exit 2}}")
+        return True
+
+    def eco_apply_patch(self) -> bool:
+        """ Apply the mapped patch as netlist edits; its new cells come in unplaced """
+        script = str(self.eco_script)
+        if not os.path.isfile(script):
+            self.logger.error(f"ECO script {script} not found")
+            return False
+        self.append(f"if {{[catch {{source {script}}} err]}} {{puts $err; puts {{ERROR: failed to apply {script}}}; exit 2}}")
+        self.append('puts "ECO cells to place: [llength [get_db insts -if {.place_status == unplaced}]]"')
+        return True
+
+    def eco_place(self) -> bool:
+        """ Place the new cells in the space the fillers held, without moving placed cells, then refill """
+        decaps = self.technology.get_special_cell_by_type(CellType.Decap)
+        stdfillers = self.technology.get_special_cell_by_type(CellType.StdFiller)
+        fillers = [str(c) for cells in decaps[:1] + stdfillers[:1] for c in cells.name]
+        if len(fillers) > 0:
+            self.verbose_append("delete_filler -cells {{{cells}}} -prefix {{}}".format(cells=" ".join(fillers)))
+        self.verbose_append("place_eco")
+        self.append('if {[llength [get_db insts -if {.place_status == unplaced}]]} '
+                    '{puts {ERROR: place_eco left cells unplaced}; exit 2}')
+        self.verbose_append("check_place eco_check_place.rpt")
+        return self.add_fillers()
+
+    def eco_route(self) -> bool:
+        """ Route the new and changed nets, keeping the existing routing """
+        self.verbose_append("route_eco")
+        return True
+
+    def eco_opt_design(self) -> bool:
+        """ Post-route optimization for the timing the patch disturbed """
+        self.verbose_append("opt_design -post_route -setup -hold -expanded_views -timing_debug_report")
         return True
 
     def write_netlist(self) -> bool:

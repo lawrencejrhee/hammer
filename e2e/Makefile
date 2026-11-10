@@ -32,8 +32,13 @@ POWER_CONF          ?= $(if $(findstring power-rtl,$(MAKECMDGOALS)), configs-des
 ECO_CONF            ?= $(if $(findstring eco,$(MAKECMDGOALS)), $(wildcard configs-design/$(design)/eco.yml), )
 SRAM_CONF           ?= $(OBJ_DIR)/sram_generator-output.json
 
-PROJ_YMLS           ?= $(PDK_CONF) $(TOOLS_CONF) $(DESIGN_CONF) $(DESIGN_PDK_CONF) $(SIM_CONF) $(POWER_CONF) $(ECO_CONF) $(extra)
-HAMMER_EXTRA_ARGS   ?= $(foreach conf, $(PROJ_YMLS), -p $(conf)) -p $(SRAM_CONF) $(args)
+# A project from `studio register-projects` (registration.json) gets its hammer.d from `studio make-dag`,
+# which bakes in the DAG's configs, its SRAMs ($(pdk)-extras.yml) included. Passing its configs again, or
+# sram_generator's output, would change the config the DAG ran syn and par with, and rerun both.
+REGISTERED          := $(wildcard configs-design/$(design)/registration.json)
+
+PROJ_YMLS           ?= $(if $(REGISTERED),$(extra),$(PDK_CONF) $(TOOLS_CONF) $(DESIGN_CONF) $(DESIGN_PDK_CONF) $(SIM_CONF) $(POWER_CONF) $(ECO_CONF) $(extra))
+HAMMER_EXTRA_ARGS   ?= $(foreach conf, $(PROJ_YMLS), -p $(conf)) $(if $(REGISTERED),,-p $(SRAM_CONF)) $(args)
 
 
 
@@ -42,8 +47,13 @@ HAMMER_D_MK = $(OBJ_DIR)/hammer.d
 
 build: $(HAMMER_D_MK)
 
+ifneq ($(REGISTERED),)
+$(HAMMER_D_MK):
+	$(STUDIO) make-dag --design $(design) --pdk $(pdk) --tools $(tools) --env $(env) --obj-dir $(OBJ_DIR)
+else
 $(HAMMER_D_MK): $(SRAM_CONF)
 	$(HAMMER_DRIVER) --obj_dir $(OBJ_DIR) -e $(ENV_YML) $(HAMMER_EXTRA_ARGS) build
+endif
 
 # designs works on every project, not $(design): don't build that design's hammer.d just to include it
 ifeq ($(filter designs,$(MAKECMDGOALS)),)

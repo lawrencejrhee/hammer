@@ -24,6 +24,10 @@ formal.conformal:
   #                   patched netlist comes out flat
   eco_method: "hierarchical"
 
+  # Genus that a functional ECO maps its patch onto library cells with (optimize_patch).
+  # null: the DDI Genus of synthesis.genus.version, the one synthesis runs (genus on the PATH without one)
+  eco_genus_bin: null
+
 formal.inputs:
   # Check type to run. Supported types in this plugin:
   # - lec: logical equivalence checking

@@ -232,8 +232,8 @@ def test_the_real_dag_puts_par_to_eco_between_par_and_eco(tmp_path, monkeypatch)
     assert "module_dummy.par_to_eco" in edges["par"]
     assert edges["bridge"] == ["module_dummy.par"]
     assert edges["eco_up"] == ["module_dummy.par_to_eco"]
-    # eco is a leaf of the module group, like the other signoff stages
-    assert edges["eco_down"] == ["cache_summary_", "exit_"]
+    # eco feeds only its place-and-route bridge
+    assert edges["eco_down"] == ["module_dummy.eco_to_par"]
 
 
 @pytest.fixture

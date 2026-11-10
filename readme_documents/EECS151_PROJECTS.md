@@ -27,7 +27,10 @@ make designs project=gatelevelgurus   # just one (with its copies)
 and then runs `studio make-dag` for it. Within a few minutes Airflow's
 dag-processor lists the design as `sledgehammer_<project>_<user>`; trigger it
 from there like any other design. The Make flow works too:
-`make syn design=gatelevelgurus`.
+`make syn design=gatelevelgurus`. It runs the same commands with the same
+configs as the DAG (the e2e Makefile adds only `extra=` and `args=` for a
+design with `registration.json`), so stages either flow ran stay cached in the
+other.
 
 Each project registers on its own. One that cannot become a valid design is
 reported by name with the reason, the others still register, and the command
@@ -70,7 +73,7 @@ Everything lands in `e2e/configs-design/<project>/`, which git ignores:
 |---|---|
 | `common.yml` | from the syn and par configs: top module, RTL (through `prependlocal` paths relative to this file, so it works from any checkout), clocks, delays, placement, pins |
 | `sky130.yml` | from the tech config, plus `vlsi.inputs.sram_parameters` for the SRAMs the design uses |
-| `sky130-extras.yml` | the SRAM libraries, as Hammer's `sram_generator` binds them, for the DAG. The Makefile flow binds the same ones itself with `make srams` |
+| `sky130-extras.yml` | the SRAM libraries, as Hammer's `sram_generator` binds them. The DAG and the Makefile flow both read them from here: for a registered design, `make` uses the `hammer.d` that `studio make-dag` writes, with the DAG's configs, and runs no `make srams` |
 | `registration.json` | where the design came from: the configs read, the RTL, every SRAM instance, and each project setting dropped and why |
 
 Settings that described the class machines are dropped, since SledgeHammer's

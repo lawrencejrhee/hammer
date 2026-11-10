@@ -297,6 +297,10 @@ class CLIDriver:
             check_CLIActionType_type(self.formal_action)
         else:
             self.formal_action = self.create_formal_action([]) # type: CLIActionConfigType
+        if hasattr(self, "eco_par_action"):
+            check_CLIActionType_type(self.eco_par_action)
+        else:
+            self.eco_par_action = self.create_action("eco_par", None) # type: CLIActionConfigType
         if hasattr(self, "timing_action"):
             check_CLIActionType_type(self.timing_action)
         else:
@@ -377,6 +381,10 @@ class CLIDriver:
             "par-to-formal": self.par_to_formal_action,
             "par_to_eco": self.par_to_eco_action,
             "par-to-eco": self.par_to_eco_action,
+            "eco_to_par": self.eco_to_par_action,
+            "eco-to-par": self.eco_to_par_action,
+            "eco_par": self.eco_par_action,
+            "eco-par": self.eco_par_action,
             "timing": self.timing_action,
             "synthesis_to_timing": self.synthesis_to_timing_action,
             "synthesis-to-timing": self.synthesis_to_timing_action,
@@ -1218,6 +1226,24 @@ class CLIDriver:
                 if driver.dump_history:
                     dump_config_to_yaml_file(os.path.join(driver.power_tool.run_dir, "power-output-history.yml"),
                                             add_key_history(self.get_full_config(driver, output), key_history))
+            elif action_type == "eco_par":
+                # Incremental place and route of a functional ECO (par.inputs.eco_script). Like eco,
+                # no dependency check, PD cache or resume: par's master database and cache stay par's.
+                if not driver.load_par_tool(get_or_else(self.par_rundir, "")):
+                    return None
+                else:
+                    post_load_func_checked(driver)
+                assert driver.par_tool is not None, "load_par_tool was unsuccessful"
+                success, output = driver.run_par(
+                        driver.par_tool.get_tool_hooks() + \
+                        list(extra_hooks or []))
+                if not success:
+                    driver.log.error("ECO place-and-route did not succeed")
+                    return None
+                post_run_func_checked(driver)
+                dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output.json"), output)
+                dump_config_to_json_file(os.path.join(driver.par_tool.run_dir, "par-output-full.json"),
+                                         self.get_full_config(driver, output))
             elif action_type == "formal":
                 if not driver.load_formal_tool(get_or_else(self.formal_rundir, "")):
                     return None
@@ -1396,6 +1422,16 @@ class CLIDriver:
             return None
         else:
             return self.get_full_config(driver, eco_input_only)
+
+    def eco_to_par_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
+        """Create a full config to run the output."""
+        par_input_only = HammerDriver.eco_output_to_par_input(driver.project_config)
+        if par_input_only is None:
+            driver.log.error("Input config does not appear to contain valid eco outputs "
+                             "(formal.outputs.eco_stylus_script and the par inputs it carries)")
+            return None
+        else:
+            return self.get_full_config(driver, par_input_only)
 
     def synthesis_to_timing_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
         """Create a full config to run the output."""

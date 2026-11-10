@@ -710,6 +710,7 @@ _READERS: Tuple[Reader, ...] = (
     Reader("lvs", ("netgen",), ("drc.magic.magic_bin", "drc.magic.rcfile"), siblings=("drc.magic.rcfile",)),
     Reader("synthesis", ("genus",), ("par.innovus.innovus_bin",), when=_genus_physical),
     Reader("par", ("vivado",), ("synthesis.vivado.",)),
+    Reader("formal", ("conformal",), ("synthesis.genus.version",)),
     Reader("synthesis", ("genus", "innovus_plus"), (ILM_OUTPUT_KEY,)),
     Reader("par", ("innovus", "mockpar", "openroad"), (ILM_OUTPUT_KEY,)),
     Reader("timing", ("tempus",), (ILM_OUTPUT_KEY,)),
