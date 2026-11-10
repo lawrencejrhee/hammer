@@ -16,6 +16,14 @@ formal.conformal:
   # Valid options: L, XL, GXL
   license: "GXL"
 
+  # How a functional ECO (formal.inputs.check: eco) finds and places its patch:
+  # - hierarchical:   compare module by module; patch each non-equivalent module from its own compare
+  # - flat_localized: one flat compare; the patch is split into the modules it touches
+  #                   (Cadence's "flattened ECO flow")
+  # - flat_global:    one flat compare of the flattened netlist; one patch at the top, so the
+  #                   patched netlist comes out flat
+  eco_method: "hierarchical"
+
 formal.inputs:
   # Check type to run. Supported types in this plugin:
   # - lec: logical equivalence checking

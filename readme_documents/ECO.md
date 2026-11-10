@@ -61,6 +61,9 @@ Conformal settings come from the formal tool's keys:
   `Conformal_ECO_GXL` is available and `Conformal_ECO` is not, so keep `GXL`.
 - `formal.conformal.version` picks the install. The default `212` segfaults on
   the RHEL 9 BWRC machines; `261` works: `formal.conformal.version: "261"`.
+- `formal.conformal.eco_method` picks how the patch is found and where it goes:
+  `hierarchical` (default), `flat_localized` or `flat_global`. See
+  [Choosing the ECO method](#choosing-the-eco-method).
 
 ## What the stage reads and writes
 
@@ -71,6 +74,12 @@ into a formal run with `formal.inputs.check: eco`:
 |---|---|---|
 | `formal.inputs.input_files` | `par.outputs.output_sim_netlist` (`<top>.sim.v`) | golden; the design that gets patched |
 | `formal.inputs.reference_files` | `formal.inputs.eco_reference_files` | revised; what the patch must match |
+
+The implemented design is golden because Conformal's ECO commands patch the
+golden side: `ANALYZE ECO` "analyzes the ECO change in the Revised root module
+when compared to the Golden root module" (Conformal Reference, LEC ECO
+commands). This is the reverse of the plain `lec` check, where the reference is
+golden. In the reports, `(G)` is the implementation and `(R)` the reference.
 | `formal.inputs.top_module` | `par.inputs.top_module` | root module of both |
 | Liberty | every library of the setup MMMC corner, from the technology | `read_library -liberty` |
 
@@ -88,16 +97,21 @@ The `eco` stage is the `formal` action run in its own rundir
 | File | What it is |
 |---|---|
 | `eco.tcl`, `eco.log` | the generated dofile and Conformal's log |
-| `01_pre_eco_verification.rpt`, `02_pre_eco_nonequivalent.rpt` | compare before the patch (expected to fail) |
-| `03_eco_check.rpt`, `04_eco_hierarchy_noneq.rpt` | ECO setup checks and the modules that need patching |
-| `patch.v`, `ecopin.do`, `hier.eco.do` | the patch, the ECO pins it needs, the hierarchical compare dofile |
-| `05_post_eco_verification.rpt`, `06_post_eco_compare_data.rpt` | compare after the patch (must pass) |
+| `01_pre_eco_verification.rpt`, `02_pre_eco_nonequivalent.rpt` | compare before the patch (expected to fail). `hierarchical`: the module-by-module result and the non-equivalent modules |
+| `03_eco_check.rpt`, `04_eco_hierarchy_noneq.rpt` | `flat_localized` only: ECO setup checks and the modules that need patching |
+| `patch.v`, `ecopin.do`, `hier.eco.do` | the patch, the ECO pins it needs, the hierarchical compare dofile. `hierarchical` also keeps one `patch_<module>.v` per patched module; `patch.v` collects them |
+| `golden_flat.v` | `flat_global` only: the implemented netlist flattened, which the patch is applied to |
+| `05_post_eco_verification.rpt`, `06_post_eco_compare_data.rpt` | the written `<top>.eco.v`, read back and compared flat against the reference (must pass) |
 | `<top>.eco.v`, `07_ECOprelogics.rpt` | the patched netlist and its report |
 | `eco.invs` | the patch as Innovus netlist-edit commands |
 
 The stage fails unless `05_post_eco_verification.rpt` reports `PASS`.
 Conformal's exit status cannot decide this: it flags the non-equivalent points
-of the first compare, which an ECO always has. When the designs already match
+of the first compare, which an ECO always has. The final compare reads the
+written netlist back rather than comparing in the same session: after a
+hierarchical compare, an in-session compare still sees the submodules as black
+boxes and checks only the top level (on Test2: 214 points, no flip-flops,
+against 2532). When the designs already match
 before the patch, the stage passes with a warning that there was nothing to
 fix.
 
@@ -114,6 +128,41 @@ setup_eco_designs` stops after reading (in `e2e/`, `make redo-eco args="..."`)
 and `--from_step patch_eco_designs` restarts from that checkpoint. The DAG
 trigger form's step fields apply to `syn` and `par` only. A run stopped early
 is judged only on the steps it ran.
+
+## Choosing the ECO method
+
+`formal.conformal.eco_method` (default `hierarchical`) picks how Conformal
+finds the logic to change and where it puts the patch. All three end with the
+same check: the written `<top>.eco.v` is read back and compared flat against
+the reference.
+
+| Method | Finds the mismatch by | Patch goes | Conformal steps |
+|---|---|---|---|
+| `hierarchical` | comparing module by module (`write_hier_compare_dofile`, `run_hier_compare`) | into each non-equivalent module, generated from that module's own compare | per module: `set_root_module`, `compare`, `analyze_eco patch_<module>.v`; then `apply_patch <module> <module>_eco -keephierarchy` |
+| `flat_localized` | one flat compare (`set_eco_option -flat`, `analyze_hier_compare -eco_aware`) | into each module the failing logic sits in | `compare_eco_hierarchy`, `analyze_eco -hierarchical`, `apply_patch -auto -keephierarchy`. Cadence's "flattened ECO flow" |
+| `flat_global` | one flat compare of the flattened netlists | one patch at the top; the patched netlist comes out flat | `flatten`, `write_design golden_flat.v`, read back; `analyze_eco`, `apply_patch -auto` |
+
+`flat_global` reads a flattened copy of the implementation (`golden_flat.v`)
+because Conformal applies a patch only to the netlist structure it read
+(`ECO1.12` otherwise), and flattens the reference too, or `analyze_eco` finds
+no implementation nets for its gates. On a hierarchical netlist left as it is,
+a top-level patch tries to re-implement most of the design (Conformal warns
+"Please use hierarchical method").
+
+Measured on `gatelevelgurus_Test2` (bugs in `Branch_comp` and `Imm_gen`), all
+three through the plugin, Conformal 26.1:
+
+| | `hierarchical` | `flat_localized` | `flat_global` |
+|---|---:|---:|---:|
+| Stage time | 241 s | 166 s | 322 s |
+| Patch | 1 library cell, 18 primitives, in 2 modules | 0 cells, 17 primitives, in 2 modules | 49 library cells, 510 primitives, at the top |
+| Innovus edits | 5 pins detached, 23 connected | 3 pins detached, 16 connected | 58 instances deleted, 319 pins detached, 259 connected |
+| Patched netlist | hierarchy kept | hierarchy kept | flat (`riscv_top` + `riscv_top_eco`) |
+| Final check | PASS, 2532 points | PASS, 2532 points | PASS, 2530 points |
+
+A flat patched netlist no longer matches the module structure of `par`'s
+Innovus database, which matters once the patch is placed and routed
+incrementally (not covered yet).
 
 ## Where this came from
 

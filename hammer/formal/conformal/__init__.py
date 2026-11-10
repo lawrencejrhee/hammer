@@ -227,15 +227,37 @@ class Conformal(HammerFormalTool, CadenceTool):
 
         return True
 
-    # Functional ECO (formal.inputs.check: eco): the flat ECO flow of the EECS 144
-    # ECO project's conformal_eco.do, in Tcl mode. The implemented design
-    # (input_files, the post-par netlist) is read as golden so that apply_patch
-    # patches it in place; the reference (reference_files, synthesized from the
-    # corrected RTL) is read as revised.
+    # Functional ECO (formal.inputs.check: eco), from the EECS 144 ECO project's
+    # conformal_eco.do, in Tcl mode. In Conformal's ECO commands the golden
+    # design is the one that gets patched (ANALYZE ECO "analyzes the ECO change
+    # in the Revised root module when compared to the Golden root module"), so
+    # the implemented design (input_files, the post-par netlist) is read as
+    # golden and the reference (reference_files, synthesized from the corrected
+    # RTL) as revised. formal.conformal.eco_method picks how the patch is found:
+    #
+    #   hierarchical    compare module by module; patch each non-equivalent
+    #                   module from its own compare
+    #   flat_localized  one flat compare; the patch is split into the modules it
+    #                   touches (Cadence's "flattened ECO flow")
+    #   flat_global     one flat compare of the flattened netlist; one patch at
+    #                   the top, so the patched netlist comes out flat
+    #
+    # Every method ends the same way: the patched netlist is written out, read
+    # back, and compared flat against the reference from scratch.
+
+    ECO_METHODS = ("hierarchical", "flat_localized", "flat_global")
+
+    @property
+    def eco_method(self) -> str:
+        return str(self.get_setting("formal.conformal.eco_method"))
 
     def setup_eco_designs(self) -> bool:
-        """ Read the Liberty and both netlists, and set up a flat ECO """
+        """ Read the Liberty and both netlists, and set them up for formal.conformal.eco_method """
         append = self.append
+        method = self.eco_method
+        if method not in self.ECO_METHODS:
+            self.logger.error(f"formal.conformal.eco_method is {method!r}; use one of {', '.join(self.ECO_METHODS)}")
+            return False
 
         # Exit on dofile error
         append("set_dofile_abort exit")
@@ -259,57 +281,130 @@ class Conformal(HammerFormalTool, CadenceTool):
             return False
         implemented_files = list(map(lambda name: os.path.join(os.getcwd(), name), self.input_files))
         append(f"read_design {' '.join(implemented_files)} -golden -replace")
-        reference_files = list(map(lambda name: os.path.join(os.getcwd(), name), self.reference_files))
-        append(f"read_design {' '.join(reference_files)} -revised -replace")
+        append(f"read_design {' '.join(self.eco_reference_paths)} -revised -replace")
         append(f"set_root_module {self.top_module} -both")
 
-        # Flat ECO on a hierarchical design
-        append("set_eco_option -flat")
-        append("uniquify -all -nolibrary -revised")
-        append("flatten -matchhierarchy -nolibrary -revised")
-
+        if method == "flat_localized":
+            append("set_eco_option -flat")
+            append("uniquify -all -nolibrary -revised")
+            append("flatten -matchhierarchy -nolibrary -revised")
+        elif method == "hierarchical":
+            append("set_flatten_model -eco")
+            append("uniquify -all -nolibrary -revised")
+        else:
+            # Conformal applies a patch only to the golden it read in (ECO1.12 otherwise),
+            # so a top-level patch needs the implemented design read in flat.
+            append("flatten -nolibrary -golden")
+            append("write_design golden_flat.v -golden -replace")
+            append("read_design golden_flat.v -golden -replace")
+            append(f"set_root_module {self.top_module} -golden")
+            # and the reference flat too, or analyze_eco finds no golden nets for its gates
+            append("flatten -nolibrary -revised")
+            append("set_flatten_model -eco")
         return True
 
     def patch_eco_designs(self) -> bool:
         """
-        Compare, patch what differs, compare again, and write the results. One
-        step, as in the original dofile: each checkpoint between steps costs
-        about as much time as the whole ECO on a small design.
+        Compare, patch what differs, write the results, and verify them. One
+        step: each checkpoint between steps costs about as much time as the
+        whole ECO on a small design.
         """
         append = self.append
+        method = self.eco_method
+        if method == "hierarchical":
+            self.patch_eco_hierarchical()
+        else:
+            # One flat compare before patching; the designs are expected to differ
+            append("set_system_mode lec")
+            if method == "flat_localized":
+                append("analyze_hier_compare -dofile hier.eco.do -replace -eco_aware -verbose")
+            append("add_compared_points -all")
+            append("compare")
+            append("redirect 01_pre_eco_verification.rpt {report_verification}")
+            append("redirect 02_pre_eco_nonequivalent.rpt {report_compare_data -class nonequivalent}")
+            if method == "flat_localized":
+                # Find the modules that differ, write a patch for each, add their ECO pins
+                append("compare_eco_hierarchy")
+                append("redirect 03_eco_check.rpt {report_eco_check -verbose}")
+                append("redirect 04_eco_hierarchy_noneq.rpt {report_eco_hierarchy -noneq -verbose}")
+                append(f"analyze_eco {self.eco_patch_path} -hierarchical -ecopin_dofile ecopin.do -replace")
+                append("set_system_mode setup")
+                append("dofile ecopin.do")
+                append("apply_patch -auto -golden -keephierarchy")
+            else:
+                append(f"analyze_eco {self.eco_patch_path} -replace")
+                append("set_system_mode setup")
+                append("apply_patch -auto -golden")
 
-        # Compare before patching; the designs are expected to differ
-        append("set_system_mode lec")
-        append("analyze_hier_compare -dofile hier.eco.do -replace -eco_aware -verbose")
-        append("add_compared_points -all")
-        append("compare")
-        append("redirect 01_pre_eco_verification.rpt {report_verification}")
-        append("redirect 02_pre_eco_nonequivalent.rpt {report_compare_data -class nonequivalent}")
+        # The patched netlist, and the patch as Innovus netlist edits
+        append(f"report_eco_changes -innovus -file {self.eco_innovus_script_path} -replace")
+        append(f"write_eco_design -newfile {self.eco_netlist_path} -replace -report 07_ECOprelogics.rpt")
 
-        # Find the modules that differ and write the patch for them
-        append("compare_eco_hierarchy")
-        append("redirect 03_eco_check.rpt {report_eco_check -verbose}")
-        append("redirect 04_eco_hierarchy_noneq.rpt {report_eco_hierarchy -noneq -verbose}")
-        append(f"analyze_eco {self.eco_patch_path} -hierarchical -ecopin_dofile ecopin.do -replace")
-
-        # Add the ECO pins and patch the implemented design
+        # Verify what was written: read it back and compare it flat against the reference
+        # from scratch. An in-session compare after a hierarchical compare still sees the
+        # submodules as black boxes and checks only the top level.
         append("set_system_mode setup")
-        append("dofile ecopin.do")
-        append("apply_patch -auto -golden -keephierarchy")
-
-        # Compare again; the patched design must now match the reference
+        append(f"read_design {self.eco_netlist_path} -golden -replace")
+        append(f"read_design {' '.join(self.eco_reference_paths)} -revised -replace")
+        append(f"set_root_module {self.top_module} -both")
         append("set_system_mode lec")
         append("add_compared_points -all")
         append("compare")
         append("redirect 05_post_eco_verification.rpt {report_verification}")
         append("redirect 06_post_eco_compare_data.rpt {report_compare_data}")
 
-        # The patched netlist, and the patch as Innovus netlist edits
-        append(f"report_eco_changes -innovus -file {self.eco_innovus_script_path} -replace")
-        append(f"write_eco_design -newfile {self.eco_netlist_path} -replace -report 07_ECOprelogics.rpt")
-
         self.ran_patch_eco_designs = True
         return True
+
+    def patch_eco_hierarchical(self) -> None:
+        """
+        Compare module by module (Cadence's "ECO for hierarchical files"), then
+        for each non-equivalent module compare it alone and write its patch, and
+        apply every patch. The module list comes from the hierarchical compare,
+        read back in Tcl. All patches are also collected into patch.v.
+        """
+        append = self.append
+        append("write_hier_compare_dofile hier.eco.do -replace -constraints -noexact_pin_match "
+               "-balanced_extractions -function_pin_mapping -input_output_pin_equivalence -eco_aware "
+               "-threshold 0 -ecopin_dofile ecopin.do")
+        append("dofile ecopin.do")
+        append("run_hier_compare hier.eco.do -nodynamic")
+        append("redirect 01_pre_eco_verification.rpt {report_hier_compare_result}")
+        append("redirect -variable eco_noneq {report_hier_compare_result -noneq}")
+        append("redirect 02_pre_eco_nonequivalent.rpt {puts $eco_noneq}")
+        append("set eco_modules {}")
+        append('foreach line [split $eco_noneq "\\n"] {')
+        append("    if {[regexp {^Non-equivalent:\\s+(\\S+)\\s+(\\S+)} $line -> golden revised]} {")
+        append("        lappend eco_modules [list $golden $revised]")
+        append("    }")
+        append("}")
+        append('puts "ECO modules: $eco_modules"')
+        append("foreach pair $eco_modules {")
+        append("    lassign $pair golden revised")
+        append("    set_system_mode setup")
+        append("    set_root_module $golden -golden")
+        append("    set_root_module $revised -revised")
+        append("    set_system_mode lec")
+        append("    add_compared_points -all")
+        append("    compare")
+        append("    analyze_eco patch_$golden.v -replace")
+        append("}")
+        append("set_system_mode setup")
+        append(f"set_root_module {self.top_module} -both")
+        append(f"set eco_patch [open {self.eco_patch_path} w]")
+        append("foreach pair $eco_modules {")
+        append("    set golden [lindex $pair 0]")
+        append("    read_design patch_$golden.v -golden -append -lastmod -norulesummary")
+        append("    apply_patch $golden ${golden}_eco -golden -keephierarchy")
+        append("    set f [open patch_$golden.v r]")
+        append("    puts $eco_patch [read $f]")
+        append("    close $f")
+        append("}")
+        append("close $eco_patch")
+
+    @property
+    def eco_reference_paths(self) -> List[str]:
+        return list(map(lambda name: os.path.join(os.getcwd(), name), self.reference_files))
 
     def eco_liberty_files(self) -> List[str]:
         """
@@ -325,10 +420,17 @@ class Conformal(HammerFormalTool, CadenceTool):
         """ The Compare Results line of a report_verification report in the rundir, e.g. PASS or FAIL:NONEQ """
         try:
             with open(os.path.join(self.run_dir, report)) as f:
-                found = re.search(r"Compare Results:\s*(\S+)", f.read())
+                text = f.read()
         except OSError:
             return None
-        return found.group(1) if found else None
+        found = re.search(r"Compare Results:\s*(\S+)", text)
+        if found:
+            return found.group(1)
+        # report_hier_compare_result, the hierarchical method's pre-ECO report
+        found = re.search(r"Hierarchical compare\s*:\s*(\S+)", text)
+        if found:
+            return {"Equivalent": "PASS", "Non-equivalent": "FAIL:NONEQ"}.get(found.group(1), found.group(1))
+        return None
 
     def fill_outputs(self) -> bool:
         if self.check != "eco":

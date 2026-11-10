@@ -13,15 +13,23 @@ from tests.utils.tool import HammerToolTestHelpers
 
 ECO_STEPS = ["setup_eco_designs", "patch_eco_designs"]
 
-# Stands in for Conformal: answers each report_verification redirect (pre-ECO, then post-ECO) and writes the
-# files the dofile names, so the plugin's checks run against what the real tool would leave behind.
+# Stands in for Conformal: answers each verification redirect (the pre-ECO compare, flat or hierarchical,
+# then the post-ECO one) and writes the files the dofile names, so the plugin's checks run against what the
+# real tool would leave behind. The hierarchical method collects its patches into patch.v from Tcl, which
+# this does not run, so it writes patch.v up front.
 FAKE_LEC = """#!{python}
 import os, re, sys
 open("lec.args", "w").write(" ".join(sys.argv[1:]))
-verdicts = iter(["FAIL:NONEQ", os.environ.get("FAKE_LEC_POST_ECO", "PASS")])
+open("patch.v", "w").write("// written by the fake lec\\n")
+post = os.environ.get("FAKE_LEC_POST_ECO", "PASS")
 for line in open(sys.argv[sys.argv.index("-dofile") + 1]).read().splitlines():
-    if re.match(r"redirect \\S+ \\{{report_verification\\}}", line):
-        open(line.split()[1], "w").write("6. Compare Results:          " + next(verdicts) + "\\n")
+    m = re.match(r"redirect (\\S+) \\{{report_verification\\}}", line)
+    if m:
+        verdict = post if m.group(1).startswith("05") else "FAIL:NONEQ"
+        open(m.group(1), "w").write("6. Compare Results:          " + verdict + "\\n")
+    m = re.match(r"redirect (\\S+) \\{{report_hier_compare_result\\}}", line)
+    if m:
+        open(m.group(1), "w").write("Hierarchical compare : Non-equivalent\\n")
     for pattern in (r"^analyze_eco (\\S+)", r"-file (\\S+)", r"-newfile (\\S+)"):
         m = re.search(pattern, line)
         if m:
@@ -74,6 +82,7 @@ def formal(tmp_path, request, monkeypatch):
         "formal.inputs.top_module": "dummy",
         "formal.conformal.conformal_lec_bin": str(lec),
         "formal.submit.command": "local",
+        **({"formal.conformal.eco_method": request.param} if hasattr(request, "param") else {}),
     }, cls=HammerJSONEncoder))
     driver = HammerDriver(HammerDriverOptions(environment_configs=[], project_configs=[str(config)],
                                               log_file=str(tmp_path / "log.txt"), obj_dir=str(tmp_path / "obj")))
@@ -107,17 +116,75 @@ class TestConformalEco:
         assert formal.driver.load_formal_tool(str(formal.run_dir))
         assert [s.name for s in formal.driver.formal_tool.steps] == ECO_STEPS
 
-    def test_the_dofile_runs_the_flat_eco_flow_in_order(self, formal) -> None:
-        ok, _ = formal()
-        assert ok
-        rundir = str(formal.run_dir)
-        expected = [
+    @staticmethod
+    def _setup(formal) -> list:
+        return [
             "set_log_file eco.log -replace",
             # the setup corner's cells, pads included, so the netlists read; not the hold corner's second copy
             f"read_library {formal.tech_dir}/slow.lib {formal.tech_dir}/pads.lib -liberty -both -replace",
+            # Conformal patches the golden design: the implemented one, read as golden
             f"read_design {formal.impl} -golden -replace",
             f"read_design {formal.fixed} -revised -replace",
             "set_root_module dummy -both",
+        ]
+
+    @staticmethod
+    def _write_and_verify(formal) -> list:
+        rundir = str(formal.run_dir)
+        return [
+            f"report_eco_changes -innovus -file {rundir}/eco.invs -replace",
+            f"write_eco_design -newfile {rundir}/dummy.eco.v -replace -report 07_ECOprelogics.rpt",
+            # what was written is read back and compared flat against the reference from scratch
+            "set_system_mode setup",
+            f"read_design {rundir}/dummy.eco.v -golden -replace",
+            f"read_design {formal.fixed} -revised -replace",
+            "set_root_module dummy -both",
+            "set_system_mode lec",
+            "add_compared_points -all",
+            "compare",
+            "redirect 05_post_eco_verification.rpt {report_verification}",
+            "redirect 06_post_eco_compare_data.rpt {report_compare_data}",
+            "checkpoint post_patch_eco_designs -replace",
+            "exit",
+        ]
+
+    def _check(self, formal, middle: list) -> list:
+        ok, _ = formal()
+        assert ok
+        commands = _commands(formal.run_dir)
+        _assert_in_order(commands, self._setup(formal) + middle + self._write_and_verify(formal))
+        # a checkpoint costs about as much as the ECO, so only the plugin's usual two: after reading and at the end
+        assert len([c for c in commands if c.startswith("checkpoint")]) == 2
+        assert not any("fast.lib" in c for c in commands)
+        args = (formal.run_dir / "lec.args").read_text().split()
+        assert args[:5] == ["-ECOGXL", "-nogui", "-color", "-tclmode", "-dofile"]
+        return commands
+
+    def test_hierarchical_is_the_default(self, formal) -> None:
+        commands = self._check(formal, [
+            "set_flatten_model -eco",
+            "uniquify -all -nolibrary -revised",
+            "checkpoint pre_patch_eco_designs -replace",
+            "write_hier_compare_dofile hier.eco.do -replace -constraints -noexact_pin_match "
+            "-balanced_extractions -function_pin_mapping -input_output_pin_equivalence -eco_aware "
+            "-threshold 0 -ecopin_dofile ecopin.do",
+            "dofile ecopin.do",
+            "run_hier_compare hier.eco.do -nodynamic",
+            "redirect 01_pre_eco_verification.rpt {report_hier_compare_result}",
+            "redirect -variable eco_noneq {report_hier_compare_result -noneq}",
+            # each non-equivalent module is compared alone and patched
+            "    set_root_module $golden -golden",
+            "    set_root_module $revised -revised",
+            "    analyze_eco patch_$golden.v -replace",
+            "set_root_module dummy -both",
+            "    apply_patch $golden ${golden}_eco -golden -keephierarchy",
+        ])
+        assert not any(c.startswith("flatten") for c in commands)
+
+    @pytest.mark.parametrize("formal", ["flat_localized"], indirect=True)
+    def test_flat_localized_splits_one_flat_compare_by_module(self, formal) -> None:
+        rundir = str(formal.run_dir)
+        self._check(formal, [
             "set_eco_option -flat",
             "uniquify -all -nolibrary -revised",
             "flatten -matchhierarchy -nolibrary -revised",
@@ -135,23 +202,36 @@ class TestConformalEco:
             "set_system_mode setup",
             "dofile ecopin.do",
             "apply_patch -auto -golden -keephierarchy",
+        ])
+
+    @pytest.mark.parametrize("formal", ["flat_global"], indirect=True)
+    def test_flat_global_patches_the_flattened_netlist_at_the_top(self, formal) -> None:
+        rundir = str(formal.run_dir)
+        commands = self._check(formal, [
+            "flatten -nolibrary -golden",
+            "write_design golden_flat.v -golden -replace",
+            "read_design golden_flat.v -golden -replace",
+            "set_root_module dummy -golden",
+            "flatten -nolibrary -revised",
+            "set_flatten_model -eco",
+            "checkpoint pre_patch_eco_designs -replace",
             "set_system_mode lec",
             "add_compared_points -all",
             "compare",
-            "redirect 05_post_eco_verification.rpt {report_verification}",
-            "redirect 06_post_eco_compare_data.rpt {report_compare_data}",
-            f"report_eco_changes -innovus -file {rundir}/eco.invs -replace",
-            f"write_eco_design -newfile {rundir}/dummy.eco.v -replace -report 07_ECOprelogics.rpt",
-            "checkpoint post_patch_eco_designs -replace",
-            "exit",
-        ]
-        commands = _commands(formal.run_dir)
-        _assert_in_order(commands, expected)
-        # a checkpoint costs about as much as the ECO, so only the plugin's usual two: after reading and at the end
-        assert len([c for c in commands if c.startswith("checkpoint")]) == 2
-        assert not any("fast.lib" in c for c in commands)
-        args = (formal.run_dir / "lec.args").read_text().split()
-        assert args[:5] == ["-ECOGXL", "-nogui", "-color", "-tclmode", "-dofile"]
+            "redirect 01_pre_eco_verification.rpt {report_verification}",
+            f"analyze_eco {rundir}/patch.v -replace",
+            "set_system_mode setup",
+            "apply_patch -auto -golden",
+        ])
+        assert not any("-hierarchical" in c or "-keephierarchy" in c for c in commands)
+
+    @pytest.mark.parametrize("formal", ["flat"], indirect=True)
+    def test_an_unknown_method_is_an_error(self, formal, monkeypatch) -> None:
+        monkeypatch.setattr(HammerVLSILogging, "enable_buffering", True)
+        HammerVLSILogging.add_callback(HammerVLSILogging.callback_buffering)
+        ok, _ = formal()
+        assert not ok
+        assert any("eco_method is 'flat'" in line for line in HammerVLSILogging.get_buffer())
 
     def test_a_closed_eco_exports_its_artifacts(self, formal) -> None:
         ok, outputs = formal()
