@@ -267,6 +267,7 @@ class CLIDriver:
         self._explicit_start_given = False
         self._explicit_after_step = None  # type: Optional[str]
         self.force_local = False  # type: bool  # --local: skip the DB cache pull
+        self.sim_tests = []  # type: List[str]  # --sim_tests: the sim.tests programs to run
         self.synthesis_action: CLIActionConfigType
         # If a subclass has defined these, don't clobber them in init
         # since the subclass still uses this init function.
@@ -1234,6 +1235,11 @@ class CLIDriver:
                 if not legacy:
                     driver.database.commit_master_database()
             elif action_type == "sim":
+                has_test_suites = bool(driver.database.get_setting("sim.tests.suites", nullvalue=[], check_type=False))
+                if self.sim_tests and not has_test_suites:
+                    driver.log.error("--sim_tests was given, but this design sets no sim.tests.suites, "
+                                     "so no test would run.")
+                    return None
                 if not driver.load_sim_tool(get_or_else(self.sim_rundir, "")):
                     return None
                 else:
@@ -1255,6 +1261,13 @@ class CLIDriver:
                 if driver.dump_history:
                     dump_config_to_yaml_file(os.path.join(driver.sim_tool.run_dir, "sim-output-history.yml"),
                                             add_key_history(self.get_full_config(driver, output), key_history))
+                if self.sim_tests:
+                    from hammer.vlsi import sim_tests
+                    if not sim_tests.run_selected(driver, self.sim_tests):
+                        return None
+                elif has_test_suites:
+                    driver.log.info("No sim tests selected, so the simulator was only compiled "
+                                    "(select some with --sim_tests).")
             elif action_type == "power":
                 if not driver.load_power_tool(get_or_else(self.power_rundir, "")):
                     return None
@@ -2286,6 +2299,7 @@ class CLIDriver:
 
         self.force_rerun = bool(args.get('force', False))
         self.force_local = bool(args.get('local', False))
+        self.sim_tests = list(args.get('sim_tests') or [])
 
         # Check for action after creating the driver (e.g. for custom actions like hierarchical actions).
         action = str(args['action'])  # type: str
@@ -2357,6 +2371,9 @@ class CLIDriver:
                             help='(optional) Directory to store LVS results in')
         parser.add_argument("--sim_rundir", required=False, default="",
                             help='(optional) Directory to store simulation results in')
+        parser.add_argument("--sim_tests", action="append", required=False, default=[],
+                            help='(optional) sim.tests programs to run after compiling: suite or '
+                                 'suite:test,test. May be repeated.')
         parser.add_argument("--power_rundir", required=False, default="",
                             help='(optional) Directory to store power results in')
         parser.add_argument("--formal_rundir", required=False, default="",

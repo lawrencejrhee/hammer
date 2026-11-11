@@ -876,6 +876,31 @@ sim.inputs:
   execute_sim: true # Determines whether or not the simulation executable that is generated with the above inputs will actually be executed with the given flags or if the executable will just be generated in the specified run directory.
   # type: bool
 
+# Test programs to run on the compiled simulator. Tests run only when selected (--sim_tests on the sim action).
+# Selected tests always run, and their results are never cached. A design with no suites is not affected.
+sim.tests:
+  suites: []
+  # Each suite is a dict:
+  #   name: the suite's name, used to select it (required)
+  #   tests: test names; leave out for a single test named after the suite
+  #   program: path of the test's program, e.g. "tests/asm/{test}.hex"; relative to the working directory
+  #   flags: simulator flags, e.g. ["+max-cycles=50000", "+loadmem={program}"]; {test}, {suite} and {program}
+  #     are replaced
+  #   pass_regex: a test passes if the simulator exits 0 and this matches its stderr or stdout (required)
+  #   prepare: shell commands run once from the working directory before the suite's tests, e.g. to build programs
+  # type: List[Dict[str, Any]]
+
+  run_prefix: [] # Commands the simulator is run through, e.g. a licence-retry wrapper.
+  # type: List[str]
+
+  run_flags: [] # Simulator flags for every test, before the suite's own flags.
+  # type: List[str]
+
+  output_dir: null # Where each test's <suite>/<test>.out (stderr), .log (stdout) and results.json go. Set this for
+  # tests that print a lot and a run directory on slow storage. A subdirectory named after the run directory is
+  # used, so stages do not collide. null: <run directory>/tests.
+  # type: Optional[str]
+
 sim.submit:
   command: "${vlsi.submit.command}"
   command_meta: lazysubst

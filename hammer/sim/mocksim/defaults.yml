@@ -1,2 +1,3 @@
 sim.mocksim:
   temp_folder: null # A folder where mocksim can create files.
+  simv_script: null # Text of a script to write as the compiled simulator that sim.tests runs.

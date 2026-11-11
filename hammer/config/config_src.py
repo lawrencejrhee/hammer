@@ -857,6 +857,8 @@ RUN_CONTROL_KEYS = frozenset({
     # Which generator writes the build file (make, a DAG, or legacy hammer) never changes what a
     # stage produces; a partner's pulled build sets it differently from the owner's.
     "vlsi.core.build_system",
+    # Which test programs run on a compiled simulator never changes what compiling it produces.
+    "sim.tests.suites", "sim.tests.run_prefix", "sim.tests.run_flags", "sim.tests.output_dir",
 }) | frozenset(f"vlsi.core.stage_configs.{stage}" for stage in STAGE_CONFIG_STAGES)
 
 

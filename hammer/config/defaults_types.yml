@@ -566,6 +566,12 @@ sim.inputs:
   # type: bool
   execute_sim: bool
 
+sim.tests:
+  suites: list[dict[str, Any]]
+  run_prefix: list[str]
+  run_flags: list[str]
+  output_dir: Optional[str]
+
 sim.submit:
   command: str
   settings: list[dict[str, dict]]
