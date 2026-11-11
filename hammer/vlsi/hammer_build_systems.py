@@ -1068,6 +1068,22 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                 raise AirflowSkipException("sim_par task skipped")
 
         @task
+        def sim_tests_(stage, sim_out, sim_run_dir, **context):
+            # The stage's own selection (tests_<stage>), else the one shared by every sim stage (sim_tests), run on
+            # the simulator the stage's sim task just compiled (its output JSON names exactly what was compiled). A
+            # failing test fails this task, not the compile. The conf keys are not task ids on purpose: a conf key
+            # equal to a task id would make should_run_stage pull that task's upstream stages into the run.
+            conf = context['dag_run'].conf or {}
+            selections = conf.get(f"tests_{stage}") or conf.get("sim_tests") or []
+            if should_run_stage(stage, context) and selections:
+                flags = ["-p", sim_out, "--sim_rundir", sim_run_dir]
+                for selection in selections:
+                    flags += ["--sim_tests", str(selection)]
+                run_hammer_action("sim-tests", flags)
+            else:
+                raise AirflowSkipException(f"{stage}_tests skipped: no sim tests selected for {stage}")
+
+        @task
         def par_to_power(par_out, power_par_in, **context):
             if should_run_stage('power_par', context):
                 run_hammer_action("par-to-power", ["-p", par_out, "-o", power_par_in])
@@ -1233,6 +1249,15 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                          description_md='Stop the selected stage after this sub-step (its checkpoint stays resumable).\\n\\n{_steps_hint}'),
         'only_step': Param(default='', type=['string', 'null'], title='Only step',
                            description_md='Run exactly this one sub-step of the selected stage.\\n\\n{_steps_hint}'),
+        'tests_sim_rtl': Param(default=[], type=['array', 'null'], title='RTL tests (sim_rtl)',
+                               section='Sim tests (for sim_rtl, sim_syn, sim_par)',
+                               description='Test programs to run after RTL Simulation compiles: suite or suite:test,test, one per line. Runs only when RTL Simulation is ticked; leave empty to only compile.'),
+        'tests_sim_syn': Param(default=[], type=['array', 'null'], title='Post-synthesis tests (sim_syn)',
+                               section='Sim tests (for sim_rtl, sim_syn, sim_par)',
+                               description='Test programs to run on the synthesized netlist: suite or suite:test,test, one per line. Runs only when Simulation Synthesis is ticked; leave empty to only compile.'),
+        'tests_sim_par': Param(default=[], type=['array', 'null'], title='Post-place-and-route tests (sim_par)',
+                               section='Sim tests (for sim_rtl, sim_syn, sim_par)',
+                               description='Test programs to run on the placed-and-routed netlist: suite or suite:test,test, one per line. Runs only when Simulation Place and Route is ticked; leave empty to only compile.'),
         'steps_stage': Param(default='syn', type='string', enum=['syn', 'par'], title='Step flags apply to',
                              description='Which stage the from/to/only step fields target.'),
     }},
@@ -1381,6 +1406,14 @@ def hammer_dag():
             p_to_time >> t_par
             p_to_drc >> d_node
             p_to_lvs >> l_node
+
+            # Each sim stage's test programs run in their own task after it compiles; power needs only the compile.
+            s_rtl >> sim_tests_.override(task_id="sim_rtl_tests")(
+                "sim_rtl", paths_dict['sim_rtl_out'], paths_dict['sim_rtl_run_dir'])
+            s_syn >> sim_tests_.override(task_id="sim_syn_tests")(
+                "sim_syn", paths_dict['sim_syn_out'], paths_dict['sim_syn_run_dir'])
+            s_par >> sim_tests_.override(task_id="sim_par_tests")(
+                "sim_par", paths_dict['sim_par_out'], paths_dict['sim_par_run_dir'])
 
         # Return the par task too so the hierarchical bridge can depend on just
         # this module's par (its par-output-full.json feeds the parent's

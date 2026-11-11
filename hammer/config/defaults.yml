@@ -876,8 +876,9 @@ sim.inputs:
   execute_sim: true # Determines whether or not the simulation executable that is generated with the above inputs will actually be executed with the given flags or if the executable will just be generated in the specified run directory.
   # type: bool
 
-# Test programs to run on the compiled simulator. Tests run only when selected (--sim_tests on the sim action).
-# Selected tests always run, and their results are never cached. A design with no suites is not affected.
+# Test programs to run on the compiled simulator. Tests run only when selected, per sim stage (`sledgehammer run
+# sim-rtl --tests asm:all`, --rtl-tests/--syn-tests/--par-tests, the trigger form's per-stage fields, or --sim_tests
+# on the sim and sim-tests actions). Selected tests always run, and their results are never cached. A design with no suites is not affected.
 sim.tests:
   suites: []
   # Each suite is a dict:

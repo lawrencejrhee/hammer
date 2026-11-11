@@ -37,6 +37,39 @@ class TestAirflowEnv:
         assert seen["env"]["LD_LIBRARY_PATH"] == "/usr/lib64"
 
 
+class TestRunSimTests:
+    NEW_DAG = "'tests_sim_rtl': Param(default=[])"
+    OLD_DAG = "'sim_tests': Param(default=[])"
+
+    def _trigger(self, tmp_path, monkeypatch, args, dag_text=NEW_DAG):
+        return TestRunForce()._trigger(tmp_path, monkeypatch, args, dag_text=dag_text)
+
+    def test_each_stage_flag_sets_its_own_selection(self, tmp_path, monkeypatch) -> None:
+        conf = self._trigger(tmp_path, monkeypatch, ["sim-rtl", "sim-syn", "sim-par", "--rtl-tests", "asm:all",
+                                                     "--rtl-tests", "bmark:all", "--syn-tests", "bmark:fib",
+                                                     "--par-tests", "asm:addi"])
+        assert conf == {"sim_rtl": True, "sim_syn": True, "sim_par": True, "tests_sim_rtl": ["asm:all", "bmark:all"],
+                        "tests_sim_syn": ["bmark:fib"], "tests_sim_par": ["asm:addi"]}
+
+    def test_tests_still_selects_for_every_sim_stage(self, tmp_path, monkeypatch) -> None:
+        conf = self._trigger(tmp_path, monkeypatch, ["sim-rtl", "--tests", "asm:all"])
+        assert conf == {"sim_rtl": True, "sim_tests": ["asm:all"]}
+
+    def test_tests_still_works_with_an_older_dag(self, tmp_path, monkeypatch) -> None:
+        conf = self._trigger(tmp_path, monkeypatch, ["sim-rtl", "--tests", "asm:all"], dag_text=self.OLD_DAG)
+        assert conf["sim_tests"] == ["asm:all"]
+
+    def test_a_stage_flag_without_its_stage_is_an_error(self, tmp_path, monkeypatch) -> None:
+        with pytest.raises(SystemExit) as cm:
+            self._trigger(tmp_path, monkeypatch, ["sim-rtl", "--syn-tests", "bmark:fib"])
+        assert "--syn-tests needs sim-syn" in str(cm.value)
+
+    def test_a_stage_flag_on_an_older_dag_is_an_error(self, tmp_path, monkeypatch) -> None:
+        with pytest.raises(SystemExit) as cm:
+            self._trigger(tmp_path, monkeypatch, ["sim-rtl", "--rtl-tests", "asm:all"], dag_text=self.OLD_DAG)
+        assert "predates per-stage sim tests" in str(cm.value)
+
+
 class TestRunForce:
     def _trigger(self, tmp_path, monkeypatch, args, dag_text="'forceall': Param(default=False)"):
         import getpass

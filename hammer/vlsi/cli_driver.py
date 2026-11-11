@@ -372,6 +372,8 @@ class CLIDriver:
             "lvs": self.lvs_action,
             "sim": self.sim_action,
             "simulation": self.sim_action,
+            "sim-tests": self.sim_tests_action,
+            "sim_tests": self.sim_tests_action,
             "synthesis_to_sim": self.synthesis_to_sim_action,
             "synthesis-to-sim": self.synthesis_to_sim_action,
             "syn_to_sim": self.synthesis_to_sim_action,
@@ -1401,6 +1403,26 @@ class CLIDriver:
             return None
         else:
             return self.get_full_config(driver, sim_input_only)
+
+    def sim_tests_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
+        """Run the --sim_tests programs on the simulator a sim action already compiled in --sim_rundir. Pass that
+        sim action's sim-output-full.json with -p so the tests use exactly what was compiled. Never compiles."""
+        if not self.sim_rundir:
+            driver.log.error("sim-tests needs --sim_rundir: the run directory of the sim action that compiled the simulator.")
+            return None
+        has_test_suites = bool(driver.database.get_setting("sim.tests.suites", nullvalue=[], check_type=False))
+        if self.sim_tests and not has_test_suites:
+            driver.log.error("--sim_tests was given, but this design sets no sim.tests.suites, so no test would run.")
+            return None
+        if not self.sim_tests:
+            driver.log.info("No sim tests selected, so none ran (select some with --sim_tests).")
+            return {}
+        if not driver.load_sim_tool(self.sim_rundir):
+            return None
+        from hammer.vlsi import sim_tests
+        if not sim_tests.run_selected(driver, self.sim_tests):
+            return None
+        return {}
 
     def par_to_sim_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
         """Create a full config to run the output."""
