@@ -59,6 +59,39 @@ vlsi.core:
   airflow_dag_id: null # Airflow dag_id (null: sledgehammer_<design>_<user>).
   airflow_edge: false # Run every task on an EdgeExecutor queue as the DAG owner.
   airflow_queue: null # That queue's name (null: the generating user's name).
+  # Config files only some stages read. A file listed under a stage is taken out of every other stage's
+  # configs, whether or not it is also a -p of the build call, and that stage reads it after the project
+  # configs and before any generated input JSON. Use the _meta suffix to resolve relative paths against the
+  # yml that names them, e.g.
+  #   vlsi.core.stage_configs.sim_rtl: ["sim-rtl.yml"]
+  #   vlsi.core.stage_configs.sim_rtl_meta: prependlocal
+  # type: List[str]
+  stage_configs:
+    sim_rtl: []
+    power_rtl: []
+    syn: []
+    syn_to_sim: []
+    sim_syn: []
+    syn_to_power: []
+    power_syn: []
+    syn_to_formal: []
+    formal_syn: []
+    syn_to_timing: []
+    timing_syn: []
+    syn_to_par: []
+    par: []
+    par_to_sim: []
+    sim_par: []
+    par_to_power: []
+    power_par: []
+    par_to_formal: []
+    formal_par: []
+    par_to_timing: []
+    timing_par: []
+    par_to_drc: []
+    drc: []
+    par_to_lvs: []
+    lvs: []
 
 vlsi.technology:
 # TODO ucb-bar/hammer#317 move these to technology.core (discussion to be had)

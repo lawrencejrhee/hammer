@@ -833,6 +833,18 @@ def expand_paths(db_dict: dict, hammer_dir: str) -> dict:
     return result
 
 
+# The flow's stages that can be given their own config files with vlsi.core.stage_configs.<stage>.
+# Each is a task of the generated DAG.
+STAGE_CONFIG_STAGES = (
+    "sim_rtl", "power_rtl",
+    "syn", "syn_to_sim", "sim_syn", "syn_to_power", "power_syn",
+    "syn_to_formal", "formal_syn", "syn_to_timing", "timing_syn",
+    "syn_to_par", "par", "par_to_sim", "sim_par", "par_to_power", "power_par",
+    "par_to_formal", "formal_par", "par_to_timing", "timing_par",
+    "par_to_drc", "drc", "par_to_lvs", "lvs",
+)
+
+
 # SledgeHammer keys that choose how a stage runs (caching, resume, error scan,
 # where its DAG goes), never what it produces: they stay out of the dependency
 # check and the PD cache key, so setting one never reruns or re-keys a stage.
@@ -845,7 +857,7 @@ RUN_CONTROL_KEYS = frozenset({
     # Which generator writes the build file (make, a DAG, or legacy hammer) never changes what a
     # stage produces; a partner's pulled build sets it differently from the owner's.
     "vlsi.core.build_system",
-})
+}) | frozenset(f"vlsi.core.stage_configs.{stage}" for stage in STAGE_CONFIG_STAGES)
 
 
 def run_control_keys(db: Mapping[str, Any]) -> FrozenSet[str]:

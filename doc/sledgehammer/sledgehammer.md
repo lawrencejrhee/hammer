@@ -120,3 +120,24 @@ To run flow:
 ![alt_text](airflow_trigger_parameters.png)
 
 
+
+## Giving a stage its own config files
+
+By default every stage reads every `-p` config of the build call. When two files set the same keys, such as an
+RTL and a gate-level simulation config, the last one wins for every stage. To give a file to only some stages,
+name it under `vlsi.core.stage_configs.<stage>`, in any file passed with `-p` at build:
+
+```yaml
+vlsi.core.stage_configs.sim_rtl: ["sim-rtl.yml"]
+vlsi.core.stage_configs.sim_rtl_meta: prependlocal
+vlsi.core.stage_configs.sim_syn: ["sim-gl-syn.yml"]
+vlsi.core.stage_configs.sim_syn_meta: prependlocal
+vlsi.core.stage_configs.sim_par: ["sim-gl-par.yml"]
+vlsi.core.stage_configs.sim_par_meta: prependlocal
+```
+
+A file named here is taken out of every other stage's configs, whether or not it is also a `-p` of the build call.
+Its stages read it after the project configs and before any generated input JSON. `<stage>` is a task of the
+generated DAG (`sim_rtl`, `syn`, `syn_to_sim`, `sim_syn`, `par_to_lvs`, `lvs`, ...; the full list is under
+`vlsi.core.stage_configs` in `defaults.yml`). Rebuild the DAG after changing these keys. The same files are used by
+the targets in `hammer.d`.

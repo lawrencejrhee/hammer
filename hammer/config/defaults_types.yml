@@ -50,6 +50,32 @@ vlsi.core:
   airflow_dag_id: Optional[str]
   airflow_edge: bool
   airflow_queue: Optional[str]
+  stage_configs:
+    sim_rtl: list[str]
+    power_rtl: list[str]
+    syn: list[str]
+    syn_to_sim: list[str]
+    sim_syn: list[str]
+    syn_to_power: list[str]
+    power_syn: list[str]
+    syn_to_formal: list[str]
+    formal_syn: list[str]
+    syn_to_timing: list[str]
+    timing_syn: list[str]
+    syn_to_par: list[str]
+    par: list[str]
+    par_to_sim: list[str]
+    sim_par: list[str]
+    par_to_power: list[str]
+    power_par: list[str]
+    par_to_formal: list[str]
+    formal_par: list[str]
+    par_to_timing: list[str]
+    timing_par: list[str]
+    par_to_drc: list[str]
+    drc: list[str]
+    par_to_lvs: list[str]
+    lvs: list[str]
 
 vlsi.technology:
   # Placement site for macros. (Optional[str])
