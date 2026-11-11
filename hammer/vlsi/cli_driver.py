@@ -1245,10 +1245,27 @@ class CLIDriver:
                 else:
                     post_load_func_checked(driver)
                 assert driver.sim_tool is not None, "load_sim_tool was unsuccessful"
-                success, output = driver.run_sim(
+                def run_sim_tool() -> Tuple[bool, dict]:
+                    return driver.run_sim(
                         driver.sim_tool.get_tool_hooks() + \
                         driver.tech.get_tech_sim_hooks(driver.sim_tool.name) + \
                         list(extra_hooks or []))
+                # Only a run that compiles and stops can be cached: a hit must never stand in for running a sim.
+                if has_test_suites and not legacy and not driver.database.get_setting("sim.inputs.execute_sim"):
+                    from hammer.vlsi.pd_cache import cache_or_run
+                    from hammer.vlsi import sim_tests
+                    sim_tests.clear_run_files(driver.sim_tool.run_dir)
+                    simulator = getattr(driver.sim_tool, "simulator_executable_path", None)
+                    success, output = cache_or_run(
+                        driver, "sim",
+                        rundir=driver.sim_tool.run_dir,
+                        output_filename="sim-output.json",
+                        run_fn=run_sim_tool,
+                        force_local=self.force_local or self.force_rerun,
+                        accept=lambda: simulator is not None and os.path.isfile(simulator),
+                    )
+                else:
+                    success, output = run_sim_tool()
                 if not success:
                     driver.log.error("Sim tool did not succeed")
                     return None
