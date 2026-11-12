@@ -267,6 +267,7 @@ class CLIDriver:
         self._explicit_start_given = False
         self._explicit_after_step = None  # type: Optional[str]
         self.force_local = False  # type: bool  # --local: skip the DB cache pull
+        self.sim_tests = []  # type: List[str]  # --sim_tests: the sim.tests programs to run
         self.synthesis_action: CLIActionConfigType
         # If a subclass has defined these, don't clobber them in init
         # since the subclass still uses this init function.
@@ -371,6 +372,8 @@ class CLIDriver:
             "lvs": self.lvs_action,
             "sim": self.sim_action,
             "simulation": self.sim_action,
+            "sim-tests": self.sim_tests_action,
+            "sim_tests": self.sim_tests_action,
             "synthesis_to_sim": self.synthesis_to_sim_action,
             "synthesis-to-sim": self.synthesis_to_sim_action,
             "syn_to_sim": self.synthesis_to_sim_action,
@@ -1234,15 +1237,37 @@ class CLIDriver:
                 if not legacy:
                     driver.database.commit_master_database()
             elif action_type == "sim":
+                has_test_suites = bool(driver.database.get_setting("sim.tests.suites", nullvalue=[], check_type=False))
+                if self.sim_tests and not has_test_suites:
+                    driver.log.error("--sim_tests was given, but this design sets no sim.tests.suites, "
+                                     "so no test would run.")
+                    return None
                 if not driver.load_sim_tool(get_or_else(self.sim_rundir, "")):
                     return None
                 else:
                     post_load_func_checked(driver)
                 assert driver.sim_tool is not None, "load_sim_tool was unsuccessful"
-                success, output = driver.run_sim(
+                def run_sim_tool() -> Tuple[bool, dict]:
+                    return driver.run_sim(
                         driver.sim_tool.get_tool_hooks() + \
                         driver.tech.get_tech_sim_hooks(driver.sim_tool.name) + \
                         list(extra_hooks or []))
+                # Only a run that compiles and stops can be cached: a hit must never stand in for running a sim.
+                if has_test_suites and not legacy and not driver.database.get_setting("sim.inputs.execute_sim"):
+                    from hammer.vlsi.pd_cache import cache_or_run
+                    from hammer.vlsi import sim_tests
+                    sim_tests.clear_run_files(driver.sim_tool.run_dir)
+                    simulator = getattr(driver.sim_tool, "simulator_executable_path", None)
+                    success, output = cache_or_run(
+                        driver, "sim",
+                        rundir=driver.sim_tool.run_dir,
+                        output_filename="sim-output.json",
+                        run_fn=run_sim_tool,
+                        force_local=self.force_local or self.force_rerun,
+                        accept=lambda: simulator is not None and os.path.isfile(simulator),
+                    )
+                else:
+                    success, output = run_sim_tool()
                 if not success:
                     driver.log.error("Sim tool did not succeed")
                     return None
@@ -1255,6 +1280,13 @@ class CLIDriver:
                 if driver.dump_history:
                     dump_config_to_yaml_file(os.path.join(driver.sim_tool.run_dir, "sim-output-history.yml"),
                                             add_key_history(self.get_full_config(driver, output), key_history))
+                if self.sim_tests:
+                    from hammer.vlsi import sim_tests
+                    if not sim_tests.run_selected(driver, self.sim_tests):
+                        return None
+                elif has_test_suites:
+                    driver.log.info("No sim tests selected, so the simulator was only compiled "
+                                    "(select some with --sim_tests).")
             elif action_type == "power":
                 if not driver.load_power_tool(get_or_else(self.power_rundir, "")):
                     return None
@@ -1371,6 +1403,26 @@ class CLIDriver:
             return None
         else:
             return self.get_full_config(driver, sim_input_only)
+
+    def sim_tests_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
+        """Run the --sim_tests programs on the simulator a sim action already compiled in --sim_rundir. Pass that
+        sim action's sim-output-full.json with -p so the tests use exactly what was compiled. Never compiles."""
+        if not self.sim_rundir:
+            driver.log.error("sim-tests needs --sim_rundir: the run directory of the sim action that compiled the simulator.")
+            return None
+        has_test_suites = bool(driver.database.get_setting("sim.tests.suites", nullvalue=[], check_type=False))
+        if self.sim_tests and not has_test_suites:
+            driver.log.error("--sim_tests was given, but this design sets no sim.tests.suites, so no test would run.")
+            return None
+        if not self.sim_tests:
+            driver.log.info("No sim tests selected, so none ran (select some with --sim_tests).")
+            return {}
+        if not driver.load_sim_tool(self.sim_rundir):
+            return None
+        from hammer.vlsi import sim_tests
+        if not sim_tests.run_selected(driver, self.sim_tests):
+            return None
+        return {}
 
     def par_to_sim_action(self, driver: HammerDriver, append_error_func: Callable[[str], None]) -> Optional[dict]:
         """Create a full config to run the output."""
@@ -2286,6 +2338,7 @@ class CLIDriver:
 
         self.force_rerun = bool(args.get('force', False))
         self.force_local = bool(args.get('local', False))
+        self.sim_tests = list(args.get('sim_tests') or [])
 
         # Check for action after creating the driver (e.g. for custom actions like hierarchical actions).
         action = str(args['action'])  # type: str
@@ -2357,6 +2410,9 @@ class CLIDriver:
                             help='(optional) Directory to store LVS results in')
         parser.add_argument("--sim_rundir", required=False, default="",
                             help='(optional) Directory to store simulation results in')
+        parser.add_argument("--sim_tests", action="append", required=False, default=[],
+                            help='(optional) sim.tests programs to run after compiling: suite or '
+                                 'suite:test,test. May be repeated.')
         parser.add_argument("--power_rundir", required=False, default="",
                             help='(optional) Directory to store power results in')
         parser.add_argument("--formal_rundir", required=False, default="",

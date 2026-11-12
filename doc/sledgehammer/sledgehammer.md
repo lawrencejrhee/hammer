@@ -120,3 +120,73 @@ To run flow:
 ![alt_text](airflow_trigger_parameters.png)
 
 
+
+## Giving a stage its own config files
+
+By default every stage reads every `-p` config of the build call. When two files set the same keys, such as an
+RTL and a gate-level simulation config, the last one wins for every stage. To give a file to only some stages,
+name it under `vlsi.core.stage_configs.<stage>`, in any file passed with `-p` at build:
+
+```yaml
+vlsi.core.stage_configs.sim_rtl: ["sim-rtl.yml"]
+vlsi.core.stage_configs.sim_rtl_meta: prependlocal
+vlsi.core.stage_configs.sim_syn: ["sim-gl-syn.yml"]
+vlsi.core.stage_configs.sim_syn_meta: prependlocal
+vlsi.core.stage_configs.sim_par: ["sim-gl-par.yml"]
+vlsi.core.stage_configs.sim_par_meta: prependlocal
+```
+
+A file named here is taken out of every other stage's configs, whether or not it is also a `-p` of the build call.
+Its stages read it after the project configs and before any generated input JSON. `<stage>` is a task of the
+generated DAG (`sim_rtl`, `syn`, `syn_to_sim`, `sim_syn`, `par_to_lvs`, `lvs`, ...; the full list is under
+`vlsi.core.stage_configs` in `defaults.yml`). Rebuild the DAG after changing these keys. The same files are used by
+the targets in `hammer.d`.
+
+## Running test programs on the compiled simulator
+
+A sim stage compiles the simulator. To also run test programs on it, describe them under `sim.tests` and select
+them when you run the stage:
+
+```yaml
+sim.inputs.execute_sim: false
+sim.tests.run_flags: ["-q", "+ntb_random_seed_automatic"]
+sim.tests.suites:
+  - name: asm
+    tests: [add, addi, beq]
+    program: "tests/asm/{test}.hex"
+    prepare: ["make -C tests/asm"]
+    flags: ["+verbose", "+max-cycles=50000", "+loadmem={program}"]
+    pass_regex: '\*\*\* PASSED \*\*\*'
+```
+
+```
+sledgehammer run sim-rtl --tests asm:all
+sledgehammer run sim-par --tests asm:add,addi
+sledgehammer run sim-rtl sim-syn --rtl-tests asm:all --rtl-tests bmark:all --syn-tests bmark:fib
+```
+
+`--tests` selects the same tests for every sim stage named in the run. `--rtl-tests`, `--syn-tests` and
+`--par-tests` select them for one stage, which then ignores `--tests`. Each needs its stage in the run.
+
+In the DAG, the tests run in their own task after the stage compiles: `sim_rtl_tests`, `sim_syn_tests` and
+`sim_par_tests`. A failing test turns only that task red; the compile task and the power tasks, which need only the
+compiled simulator, are not affected. The task's log has a line per test and a summary. In the trigger form, the
+"Sim tests (for sim_rtl, sim_syn, sim_par)" panel has one field per sim stage, one selection per line. A field is
+used only when its stage is ticked; leave it empty to only compile.
+
+Without Airflow, pass `--sim_tests` to the `sim` action, or run the `sim-tests` action on an already compiled
+simulator with `-p <run directory>/sim-output-full.json --sim_rundir <run directory>`. With the targets in
+`hammer.d`, use a `redo-` target, e.g. `make redo-sim-rtl HAMMER_EXTRA_ARGS="--sim_tests asm:all"`: plain
+`make sim-rtl` does nothing while the sim is up to date. A project's own Makefile targets may not pass
+`HAMMER_EXTRA_ARGS` at all.
+
+Each test's stderr is in `<output>/<suite>/<test>.out`, its stdout in `<test>.log`, and every verdict in
+`<output>/results.json`. `<output>` is `<run directory>/tests`, or a subdirectory of `sim.tests.output_dir`. A test
+passes if the simulator exits 0 and `pass_regex` matches its stderr or stdout. All selected tests run even after a
+failure, and the tests task then fails if any test did not pass. Tests run one at a time unless
+`sim.inputs.parallel_runs` is raised. They run on the machine running the sim action, not through `sim.submit`, and
+only with the VCS plugin so far. A design with no `sim.tests.suites` is not affected.
+
+With `sim.tests` set and `execute_sim: false`, the compiled simulator is cached like other stages, so an unchanged
+design does not compile again (`--force` recompiles). **Test results are never cached**: simulations commonly draw
+a new random seed each run, and a stored pass would not be a new sample.

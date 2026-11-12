@@ -318,6 +318,17 @@ def _stage_input_fingerprint(driver: Any, db: Dict[str, Any], stage_tag: str) ->
     return fingerprints.digest_lines(lines)
 
 
+def _sim_sources_fingerprint(driver: Any, db: Dict[str, Any]) -> str:
+    """sha256 over the bytes of what the simulator compiles. Testbenches are usually named by relative paths,
+    which the path handling below leaves as plain text, so an edit to one would not otherwise change the key."""
+    lines = [fingerprints.sha256_file(str(path)) for path in db.get("sim.inputs.input_files") or []]
+    incdirs = [os.path.abspath(path) for option in db.get("sim.inputs.options") or []
+               if isinstance(option, str) and option.startswith("+incdir+")
+               for path in option[len("+incdir+"):].split("+") if path]
+    lines += fingerprints.include_dir_lines(incdirs, fingerprints.path_roots(driver), fingerprints.action_memo(driver))
+    return fingerprints.digest_lines(lines)
+
+
 def _build_cache_key(driver: Any, stage_tag: str) -> str:
     """Compute the stage cache key from the live driver config."""
     db_json = driver.database.get_database_json()
@@ -325,7 +336,11 @@ def _build_cache_key(driver: Any, stage_tag: str) -> str:
 
     rtl_files = db.get("synthesis.inputs.input_files") or []
     rtl_files = [f for f in rtl_files if isinstance(f, str)]
-    if rtl_files and not db.get("vlsi.rtl_fingerprint_sha256"):
+    if stage_tag == "sim":
+        # The simulator is built from its own sources, not from what synthesis reads.
+        db.pop("vlsi.rtl_fingerprint_sha256", None)
+        db["vlsi.pd_cache.sim_sources"] = _sim_sources_fingerprint(driver, db)
+    elif rtl_files and not db.get("vlsi.rtl_fingerprint_sha256"):
         defines = db.get("synthesis.inputs.defines") or []
         defines = [d for d in defines if isinstance(d, str)]
         top_module = db.get("synthesis.inputs.top_module")

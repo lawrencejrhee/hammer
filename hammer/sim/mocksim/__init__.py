@@ -32,7 +32,16 @@ class MockSim(HammerSimTool, DummyHammerTool):
     def force_regs_file_path(self) -> str:
         return os.path.join(self.run_dir, "{module}_regs.txt".format(module=self.top_module))
 
+    @property
+    def simulator_executable_path(self) -> str:
+        return os.path.join(self.run_dir, "simv")
+
     def step1(self) -> bool:
+        script = self.get_setting("sim.mocksim.simv_script", None)
+        if script:
+            with open(self.simulator_executable_path, "w") as f:
+                f.write(script)
+            os.chmod(self.simulator_executable_path, 0o755)
         sim_file = os.path.join(self.run_dir, "{module}_regs.txt".format(module=self.top_module))
         with open(sim_file, "w") as f:
             f.write(self.get_setting("sim.inputs.level"))

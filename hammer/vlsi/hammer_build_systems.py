@@ -4,12 +4,14 @@
 #  See LICENSE for licence details.
 
 from .driver import HammerDriver
+from hammer.config.config_src import STAGE_CONFIG_STAGES
 
 import getpass
 import os
 import datetime
 import shutil
 import hashlib
+import json
 import re
 import sys
 import textwrap
@@ -27,6 +29,50 @@ def build_noop(driver: HammerDriver, append_error_func: Callable[[str], None]) -
     """
     dependency_graph = driver.get_hierarchical_dependency_graph()
     return dependency_graph
+
+
+STAGE_CONFIG_PREFIX = "vlsi.core.stage_configs."
+
+
+def stage_config_files(driver: HammerDriver, append_error_func: Callable[[str], None]) -> Dict[str, List[str]]:
+    """The vlsi.core.stage_configs files of each stage that has some, as real paths. A stage name that does not
+    exist or a file that is missing is an error: either would silently give a stage the wrong configs."""
+    for key in json.loads(driver.database.get_database_json()):
+        if key.startswith(STAGE_CONFIG_PREFIX) and not key.endswith("_meta") \
+                and key[len(STAGE_CONFIG_PREFIX):] not in STAGE_CONFIG_STAGES:
+            append_error_func(f"{key}: no such stage. Stages: {', '.join(STAGE_CONFIG_STAGES)}")
+    files: Dict[str, List[str]] = {}
+    for stage in STAGE_CONFIG_STAGES:
+        key = STAGE_CONFIG_PREFIX + stage
+        value = driver.database.get_setting(key, nullvalue=[], check_type=False) or []
+        if not isinstance(value, list):
+            append_error_func(f"{key} must be a list of config files, not {value!r}")
+            continue
+        if value:
+            files[stage] = [os.path.realpath(str(path)) for path in value]
+            for path in files[stage]:
+                if not os.path.isfile(path):
+                    append_error_func(f"{key}: no such file: {path}")
+    return files
+
+
+_MAKE_RECIPE = re.compile(r"^(?P<head>\t\$\(HAMMER_EXEC\) \{env_confs\} )"
+                          r"(?P<inputs>(?:\{p_\w+\}|-p \{\w+\}(?: -p \{\w+\})*) )(?P<rest>.*)$", re.MULTILINE)
+_MAKE_RUNDIR = re.compile(r"--\w+_rundir \{(\w+)_run_dir\}")
+
+
+def _add_stage_config_slots(make_text: str) -> str:
+    """Give each stage's recipe in the hammer.d template a {stage_confs_<stage>} slot, in the same place the DAG
+    puts those files: after the project configs and before any generated input JSON."""
+    def slot(match: "re.Match[str]") -> str:
+        rundir = _MAKE_RUNDIR.search(match["rest"])
+        stage = rundir[1] if rundir else match["rest"].rsplit(" ", 1)[-1].replace("{suffix}", "").replace("-", "_")
+        if stage not in STAGE_CONFIG_STAGES:
+            return match[0]
+        confs = "{stage_confs_" + stage + "}"
+        inputs = match["inputs"] + confs if match["inputs"].startswith("{p_") else confs + match["inputs"]
+        return match["head"] + inputs + match["rest"]
+    return _MAKE_RECIPE.sub(slot, make_text)
 
 
 def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None]) -> dict:
@@ -120,7 +166,12 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
     syn_deps = "$(HAMMER_DEPENDENCIES)"
     # Get the confs passed into this execution
     env_confs = " ".join(["-e " + os.path.realpath(x) for x in driver.options.environment_configs])
-    proj_confs = " ".join(["-p " + os.path.realpath(x) for x in driver.options.project_configs])
+    stage_files = stage_config_files(driver, append_error_func)
+    stage_only = {path for files in stage_files.values() for path in files}
+    proj_confs = " ".join(["-p " + os.path.realpath(x) for x in driver.options.project_configs
+                           if os.path.realpath(x) not in stage_only])
+    stage_confs = {"stage_confs_" + stage: "".join(f"-p {path} " for path in stage_files.get(stage, []))
+                   for stage in STAGE_CONFIG_STAGES}
     obj_dir = os.path.realpath(driver.obj_dir)
 
     # Global steps that are the same for hier or flat
@@ -362,6 +413,7 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
         \t$(HAMMER_EXEC) {env_confs} -p {timing_par_in} $(HAMMER_EXTRA_ARGS) --timing_rundir {timing_par_run_dir} --obj_dir {obj_dir} timing{suffix}
 
         """)
+    make_text = _add_stage_config_slots(make_text)
 
     if not dependency_graph:
         # Flat flow
@@ -418,6 +470,7 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
         par_to_syn = ""
 
         output += make_text.format(suffix="", mod=top_module, env_confs=env_confs, obj_dir=obj_dir, syn_deps=syn_deps,
+            **stage_confs,
             par_to_syn=par_to_syn,
             p_sim_rtl_in=p_sim_rtl_in, sim_rtl_out=sim_rtl_out, sim_rtl_run_dir=sim_rtl_run_dir,
             sim_syn_in=sim_syn_in, sim_syn_out=sim_syn_out, sim_syn_run_dir=sim_syn_run_dir,
@@ -507,6 +560,7 @@ def build_makefile(driver: HammerDriver, append_error_func: Callable[[str], None
                     obj_dir=obj_dir, node=node))
 
             output += make_text.format(suffix="-"+node, mod=node, env_confs=env_confs, obj_dir=obj_dir, syn_deps=syn_deps,
+                **stage_confs,
                 par_to_syn=par_to_syn,
                 p_sim_rtl_in=p_sim_rtl_in, sim_rtl_out=sim_rtl_out, sim_rtl_run_dir=sim_rtl_run_dir,
                 power_sim_rtl_in=power_sim_rtl_in, power_rtl_out=power_rtl_out, power_rtl_run_dir=power_rtl_run_dir,
@@ -568,6 +622,8 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
 
     env_str = ", ".join([f"'{x}'" for x in env_confs])
     proj_str = ", ".join([f"'{x}'" for x in proj_confs])
+    # build_makefile above already reported anything wrong with these.
+    stage_files = stage_config_files(driver, lambda _message: None)
 
     # Runtime tools dropdown. make-dag passes {tool: [configs]} (auto-discovered
     # from configs-tool/*.yml) so the generated DAG offers each tool as a
@@ -657,6 +713,9 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
         # 'tools' Param; the plain build path emits a single 'default' entry.
         PROJ_CONFS_BY_TOOLS = {proj_by_tools_str}
         DEFAULT_TOOLS = "{default_tool}"
+        # vlsi.core.stage_configs: the config files only some stages read.
+        STAGE_CONFIGS = {stage_files!r}
+        _STAGE_ONLY_CONFIGS = {{path for files in STAGE_CONFIGS.values() for path in files}}
         TOOLS_CHOICES = sorted(PROJ_CONFS_BY_TOOLS.keys())
 
         def _selected_proj_configs(context):
@@ -665,7 +724,20 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
             choice = conf.get('tools') or (context.get('params') or {{}}).get('tools') or DEFAULT_TOOLS
             if choice not in PROJ_CONFS_BY_TOOLS:
                 raise AirflowFailException(f"Unknown tools {{choice!r}}; choose one of {{TOOLS_CHOICES}}")
-            return PROJ_CONFS_BY_TOOLS[choice]
+            return [path for path in PROJ_CONFS_BY_TOOLS[choice] if path not in _STAGE_ONLY_CONFIGS]
+
+        def _with_stage_configs(flags, context):
+            \"\"\"flags with this task's own config files added after its project configs and before any input JSON.\"\"\"
+            files = STAGE_CONFIGS.get(context['task'].task_id.rsplit('.', 1)[-1].split('__')[0])
+            if not files:
+                return flags
+            flags = list(flags or [])
+            project = [path for confs in PROJ_CONFS_BY_TOOLS.values() for path in confs]
+            after = 0
+            for i in range(len(flags) - 1):
+                if flags[i] == "-p" and flags[i + 1] in project:
+                    after = i + 2
+            return flags[:after] + [arg for path in files for arg in ("-p", path)] + flags[after:]
 
         # Per-user edge execution (vlsi.core.airflow_edge). When a queue is set,
         # every task in this DAG is routed to the EdgeExecutor on that queue, so
@@ -741,6 +813,9 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                     if type(e).__name__ == "WorkspaceNotRegistered":
                         raise
                     print(f"[workspace] resolver unavailable ({{e}}); using gen-time OBJ_DIR")
+
+            if context is not None:
+                extra_flags = _with_stage_configs(extra_flags, context)
 
             # Redirect any gen-time OBJ_DIR-prefixed paths to the per-user workspace.
             if obj_dir != OBJ_DIR and extra_flags:
@@ -993,6 +1068,22 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                 raise AirflowSkipException("sim_par task skipped")
 
         @task
+        def sim_tests_(stage, sim_out, sim_run_dir, **context):
+            # The stage's own selection (tests_<stage>), else the one shared by every sim stage (sim_tests), run on
+            # the simulator the stage's sim task just compiled (its output JSON names exactly what was compiled). A
+            # failing test fails this task, not the compile. The conf keys are not task ids on purpose: a conf key
+            # equal to a task id would make should_run_stage pull that task's upstream stages into the run.
+            conf = context['dag_run'].conf or {}
+            selections = conf.get(f"tests_{stage}") or conf.get("sim_tests") or []
+            if should_run_stage(stage, context) and selections:
+                flags = ["-p", sim_out, "--sim_rundir", sim_run_dir]
+                for selection in selections:
+                    flags += ["--sim_tests", str(selection)]
+                run_hammer_action("sim-tests", flags)
+            else:
+                raise AirflowSkipException(f"{stage}_tests skipped: no sim tests selected for {stage}")
+
+        @task
         def par_to_power(par_out, power_par_in, **context):
             if should_run_stage('power_par', context):
                 run_hammer_action("par-to-power", ["-p", par_out, "-o", power_par_in])
@@ -1158,6 +1249,15 @@ def build_airflow_dag(driver: HammerDriver, append_error_func: Callable[[str], N
                          description_md='Stop the selected stage after this sub-step (its checkpoint stays resumable).\\n\\n{_steps_hint}'),
         'only_step': Param(default='', type=['string', 'null'], title='Only step',
                            description_md='Run exactly this one sub-step of the selected stage.\\n\\n{_steps_hint}'),
+        'tests_sim_rtl': Param(default=[], type=['array', 'null'], title='RTL tests (sim_rtl)',
+                               section='Sim tests (for sim_rtl, sim_syn, sim_par)',
+                               description='Test programs to run after RTL Simulation compiles: suite or suite:test,test, one per line. Runs only when RTL Simulation is ticked; leave empty to only compile.'),
+        'tests_sim_syn': Param(default=[], type=['array', 'null'], title='Post-synthesis tests (sim_syn)',
+                               section='Sim tests (for sim_rtl, sim_syn, sim_par)',
+                               description='Test programs to run on the synthesized netlist: suite or suite:test,test, one per line. Runs only when Simulation Synthesis is ticked; leave empty to only compile.'),
+        'tests_sim_par': Param(default=[], type=['array', 'null'], title='Post-place-and-route tests (sim_par)',
+                               section='Sim tests (for sim_rtl, sim_syn, sim_par)',
+                               description='Test programs to run on the placed-and-routed netlist: suite or suite:test,test, one per line. Runs only when Simulation Place and Route is ticked; leave empty to only compile.'),
         'steps_stage': Param(default='syn', type='string', enum=['syn', 'par'], title='Step flags apply to',
                              description='Which stage the from/to/only step fields target.'),
     }},
@@ -1306,6 +1406,14 @@ def hammer_dag():
             p_to_time >> t_par
             p_to_drc >> d_node
             p_to_lvs >> l_node
+
+            # Each sim stage's test programs run in their own task after it compiles; power needs only the compile.
+            s_rtl >> sim_tests_.override(task_id="sim_rtl_tests")(
+                "sim_rtl", paths_dict['sim_rtl_out'], paths_dict['sim_rtl_run_dir'])
+            s_syn >> sim_tests_.override(task_id="sim_syn_tests")(
+                "sim_syn", paths_dict['sim_syn_out'], paths_dict['sim_syn_run_dir'])
+            s_par >> sim_tests_.override(task_id="sim_par_tests")(
+                "sim_par", paths_dict['sim_par_out'], paths_dict['sim_par_run_dir'])
 
         # Return the par task too so the hierarchical bridge can depend on just
         # this module's par (its par-output-full.json feeds the parent's

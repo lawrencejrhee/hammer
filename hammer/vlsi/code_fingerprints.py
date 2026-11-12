@@ -60,6 +60,7 @@ _INFRA_FILES: Tuple[str, ...] = (
     "vlsi/substep_resume.py",
     "vlsi/time_tracking.py",
     "vlsi/error_scan.py",
+    "vlsi/sim_tests.py",
     "vlsi/rtl_check.py",
     "vlsi/fingerprints.py",
     "vlsi/code_fingerprints.py",

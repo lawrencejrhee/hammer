@@ -438,6 +438,10 @@ def build_bundle(design: str, work_dir: str, obj_dir: str, env_configs: Iterable
                     rewrite.add(arc)
             for path in named:
                 add_file(path)
+    # A stage's own config files need not be -p files of the build call, and a partner's build needs them.
+    for key, value in config.items():
+        if key.startswith("vlsi.core.stage_configs.") and isinstance(value, list):
+            config_arcnames(str(path) for path in value)
     suffixes = fingerprints.collateral_suffixes() + fingerprints.RTL_INCLUDE_SUFFIXES
     for path in dict.fromkeys(_candidate_paths(config, work_dir, suffixes)):
         if os.path.exists(path):

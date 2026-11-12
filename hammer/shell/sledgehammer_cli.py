@@ -436,6 +436,30 @@ def _dag_supports_forceall(dag_file):
         return True
 
 
+def _dag_text(dag_file):
+    try:
+        with open(dag_file) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def _dag_has_sim_tests(dag_file):
+    """True if the generated DAG runs sim test selections at all (a 'sim_tests' or per-stage tests Param)."""
+    text = _dag_text(dag_file)
+    return "'sim_tests': Param" in text or "'tests_sim_rtl': Param" in text
+
+
+def _dag_has_stage_tests(dag_file):
+    """True if the generated DAG takes a test selection per sim stage (the 'tests_sim_rtl' Param)."""
+    return "'tests_sim_rtl': Param" in _dag_text(dag_file)
+
+
+# --<level>-tests flag -> (sim stage, DAG conf key). The conf keys are deliberately not task ids.
+_STAGE_TEST_FLAGS = (("rtl_tests", "sim_rtl", "tests_sim_rtl"), ("syn_tests", "sim_syn", "tests_sim_syn"),
+                     ("par_tests", "sim_par", "tests_sim_par"))
+
+
 def _dag_has_pcb(dag_file):
     """True if the generated DAG has the pcb task (it knows the 'pcb' Param)."""
     try:
@@ -593,6 +617,14 @@ def _cmd_run(args) -> int:
                         "(default: the one the DAG was generated with)")
     p.add_argument("--workspace")
     p.add_argument("--project")
+    p.add_argument("--tests", action="append", default=[], metavar="SUITE[:TEST,...]",
+                   help="sim.tests programs to run in every sim stage of this run (its <stage>_tests task); "
+                        "may be repeated")
+    for flag, stage, _ in _STAGE_TEST_FLAGS:
+        p.add_argument("--" + flag.replace("_", "-"), dest=flag, action="append", default=[],
+                       metavar="SUITE[:TEST,...]",
+                       help=f"sim.tests programs to run for {stage.replace('_', '-')} only, instead of --tests; "
+                            f"may be repeated")
     p.add_argument("--start_before_step", "--from_step", "--from-step",
                    dest="from_step")
     p.add_argument("--stop_after_step", "--to_step", "--to-step", dest="to_step")
@@ -627,6 +659,21 @@ def _cmd_run(args) -> int:
         sys.exit(f"[sledgehammer] {dag_file} predates the pcb stage, so asking it for pcb would run "
                  f"nothing. Regenerate it first (sledgehammer buildfile).")
 
+    if a.tests:
+        if not set(actions) & {"sim_rtl", "sim_syn", "sim_par"}:
+            sys.exit("[sledgehammer] --tests needs a sim stage to run them: sim-rtl, sim-syn or sim-par.")
+        if not _dag_has_sim_tests(dag_file):
+            sys.exit(f"[sledgehammer] {dag_file} predates sim tests, so asking it for --tests would run "
+                     f"nothing. Regenerate it first (sledgehammer buildfile).")
+    for flag, stage, _ in _STAGE_TEST_FLAGS:
+        if getattr(a, flag):
+            option, name = "--" + flag.replace("_", "-"), stage.replace("_", "-")
+            if stage not in actions:
+                sys.exit(f"[sledgehammer] {option} needs {name} in this run.")
+            if not _dag_has_stage_tests(dag_file):
+                sys.exit(f"[sledgehammer] {dag_file} predates per-stage sim tests, so {option} would run "
+                         f"nothing. Regenerate it first (sledgehammer buildfile), or use --tests.")
+
     if not a.workspace:
         _check_run_lock(baked or obj_dir)
 
@@ -650,6 +697,11 @@ def _cmd_run(args) -> int:
         conf["workspace"] = a.workspace
     if a.project:
         conf["project"] = a.project
+    if a.tests:
+        conf["sim_tests"] = a.tests
+    for flag, _, key in _STAGE_TEST_FLAGS:
+        if getattr(a, flag):
+            conf[key] = getattr(a, flag)
     for k, v in (("from_step", a.from_step), ("to_step", a.to_step),
                  ("only_step", a.only_step)):
         if v:
